@@ -54,7 +54,7 @@ except ImportError:
     HAS_TK = False
 
 APP_NAME = "Duck"
-APP_VERSION = "1.2.0"
+APP_VERSION = "1.3.0"
 GITHUB_REPO = os.environ.get("DUCK_GITHUB_REPO", "Digi-Worm/duck-hub")
 if os.name == "nt":
     DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "DuckHub"
@@ -1043,25 +1043,52 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <title>Duck — Intranet Hub</title>
 <style>
   :root {
-    --bg: #0b0f19;
-    --panel: #121826;
-    --panel2: #182032;
-    --border: #253047;
-    --text: #e6edf7;
-    --muted: #8b9bb4;
-    --accent: #f59e0b;
-    --accent2: #3b82f6;
+    --bg: #020617;
+    --panel: #0f172a;
+    --panel2: #1e293b;
+    --border: #334155;
+    --text: #a5b4fc;
+    --muted: #64748b;
+    --accent: #06b6d4;
+    --accent2: #8b5cf6;
     --green: #10b981;
     --red: #ef4444;
+    --neon: #00f6ff;
+    --matrix: #059669;
+    --holo: rgba(100, 100, 255, 0.15);
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
     background: var(--bg);
     color: var(--text);
     height: 100vh;
     display: flex;
     overflow: hidden;
+    position: relative;
+  }
+  body::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -2;
+    background: linear-gradient(135deg, transparent 45%, var(--holo) 50%), 
+                radial-gradient(circle at 50% 50%, rgba(0,255,136,0.04) 0%, transparent 35%),
+                #020617;
+  }
+  body::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+    z-index: -1;
+    pointer-events: none;
+    background: repeating-linear-gradient(
+      0deg,
+      transparent,
+      transparent calc(1px + 0.5px),
+      rgba(0,255,136,0.03) calc(1px + 0.5px),
+      rgba(0,255,136,0.03) calc(2px + 0.5px)
+    );
   }
   .sidebar {
     width: 240px;
@@ -1082,23 +1109,41 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     margin-bottom: 6px;
   }
   .brand-logo {
-    width: 36px; height: 36px;
-    border-radius: 10px;
-    background: linear-gradient(135deg, #f59e0b, #d97706);
+    width: 40px; height: 40px;
+    border-radius: 12px;
+    background: linear-gradient(45deg, var(--neon), var(--matrix));
     display: grid; place-items: center;
-    font-size: 20px; font-weight: 800; color: #0b0f19;
+    font-size: 22px; font-weight: 900; color: #020617;
+    box-shadow: 0 0 20px var(--neon);
+    animation: rot 4s linear infinite;
   }
-  .brand-title { font-weight: 700; font-size: 17px; letter-spacing: 0.3px; }
-  .brand-sub { font-size: 11px; color: var(--green); }
+  @keyframes rot { 0%,100%{transform: rotate(0deg)} 50%{transform: rotate(180deg)} }
+  .brand-title {
+    font-weight: 800; font-size: 18px; letter-spacing: 0.5px;
+    background: linear-gradient(90deg, var(--accent), var(--neon));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+  }
+  .brand-sub { font-size: 12px; color: var(--green); font-family: monospace; }
   .nav-btn {
     display: flex; align-items: center; gap: 10px;
-    padding: 10px 12px; border-radius: 10px;
-    background: transparent; border: none; color: var(--muted);
-    cursor: pointer; font-size: 14px; font-weight: 500;
-    transition: all 0.15s; text-align: left;
+    padding: 10px 12px; border-radius: 8px;
+    background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+    color: var(--muted);
+    cursor: pointer; font-size: 14px; font-weight: 600;
+    transition: all 0.2s; text-align: left;
   }
-  .nav-btn:hover { background: var(--panel2); color: var(--text); }
-  .nav-btn.active { background: rgba(245, 158, 11, 0.14); color: var(--accent); border: 1px solid rgba(245, 158, 11, 0.3); }
+  .nav-btn:hover { 
+    background: var(--accent); color: #020617;
+    box-shadow: 0 0 20px var(--accent);
+    transform: translateX(2px);
+  }
+  .nav-btn.active { 
+    background: rgba(6,182,212,0.2); 
+    border-color: var(--neon); 
+    color: var(--accent);
+    box-shadow: 0 0 20px var(--neon);
+  }
   .sidebar-footer {
     margin-top: auto;
     padding-top: 12px;
@@ -1143,14 +1188,16 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     display: flex; flex-direction: column; gap: 12px;
   }
   .msg {
-    background: var(--panel); border: 1px solid var(--border);
-    padding: 10px 14px; border-radius: 12px; max-width: 78%;
+    background: rgba(15, 23, 42, 0.85); border: 1px solid var(--border);
+    padding: 12px 16px; border-radius: 12px; max-width: 78%;
     align-self: flex-start;
+    backdrop-filter: blur(10px);
+    box-shadow: 0 0 15px rgba(0,0,0,0.4);
   }
-  .msg.me { align-self: flex-end; background: #1a2438; border-color: rgba(59, 130, 246, 0.35); }
-  .msg-head { display: flex; gap: 8px; align-items: baseline; margin-bottom: 4px; font-size: 12px; }
+  .msg.me { align-self: flex-end; background: rgba(30, 58, 95, 0.9); border-color: var(--neon); box-shadow: 0 0 18px rgba(0,246,255,0.25); }
+  .msg-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; font-size: 12px; }
   .msg-sender { font-weight: 700; color: var(--accent); }
-  .msg.me .msg-sender { color: var(--accent2); }
+  .msg.me .msg-sender { color: var(--neon); }
   .msg-meta { color: var(--muted); font-size: 11px; }
   .msg-body { font-size: 14px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
   .msg-attach {
@@ -1179,34 +1226,51 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   }
   .card h3 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
   .btn {
-    background: var(--accent); color: #0b0f19; border: none;
-    padding: 8px 14px; border-radius: 8px; font-weight: 600;
-    cursor: pointer; font-size: 13px; transition: opacity 0.15s;
+    background: linear-gradient(135deg, var(--neon), var(--accent)); color: #020617; border: none;
+    padding: 10px 16px; border-radius: 8px; font-weight: 700;
+    cursor: pointer; font-size: 13px; transition: all 0.2s; position: relative;
+    overflow: hidden; font-family: inherit;
+    box-shadow: 0 4px 15px rgba(6,182,212,0.35);
   }
-  .btn:hover { opacity: 0.9; }
-  .btn.secondary { background: var(--panel2); color: var(--text); border: 1px solid var(--border); }
-  .btn.blue { background: var(--accent2); color: #fff; }
-  .btn.danger { background: var(--red); color: #fff; }
-  .btn.sm { padding: 5px 10px; font-size: 12px; }
+  .btn:hover { opacity: 0.95; transform: translateY(-2px); box-shadow: 0 8px 25px var(--neon); }
+  .btn:active { transform: translateY(0); }
+  .btn::after {
+    content: ''; position: absolute; top: 0; left: -100%;
+    width: 100%; height: 100%;
+    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
+    transition: left 0.5s;
+  }
+  .btn:hover::after { left: 100%; }
+  .btn.secondary { background: var(--panel2); color: var(--text); border: 1px solid var(--border); box-shadow: none; }
+  .btn.blue { background: linear-gradient(135deg, var(--accent2), var(--accent)); color: #fff; }
+  .btn.danger { background: linear-gradient(135deg, var(--red), #dc2626); color: #fff; }
+  .btn.sm { padding: 6px 12px; font-size: 12px; }
 
   /* Files */
   .pad { padding: 20px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 16px; }
   .dropzone {
     border: 2px dashed var(--border); border-radius: 14px;
-    padding: 28px; text-align: center; background: var(--panel);
-    cursor: pointer; transition: all 0.15s;
+    padding: 32px; text-align: center; background: linear-gradient(135deg, var(--panel), var(--panel2));
+    cursor: pointer; transition: all 0.3s;
+    box-shadow: 0 0 20px rgba(0,0,0,0.4);
   }
-  .dropzone.drag { border-color: var(--accent); background: rgba(245, 158, 11, 0.08); }
-  .file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 12px; }
+  .dropzone.drag { 
+    border-color: var(--neon); 
+    background: linear-gradient(135deg, rgba(6,182,212,0.12), var(--panel));
+    box-shadow: 0 0 30px var(--neon);
+  }
+  .file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
   .file-card {
     background: var(--panel); border: 1px solid var(--border);
     border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 8px;
+    transition: all 0.2s;
   }
+  .file-card:hover { transform: translateY(-3px); box-shadow: 0 8px 30px rgba(6,182,212,0.35); border-color: var(--accent); }
   .file-name { font-weight: 600; font-size: 14px; word-break: break-all; }
-  .file-meta { font-size: 12px; color: var(--muted); }
-  .file-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto; }
+  .file-meta { font-size: 12px; color: var(--muted); font-family: monospace; }
+  .file-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: auto; }
   .progress-wrap { height: 6px; background: var(--bg); border-radius: 4px; overflow: hidden; display: none; margin-top: 10px; }
-  .progress-bar { height: 100%; background: var(--accent); width: 0%; transition: width 0.1s; }
+  .progress-bar { height: 100%; background: linear-gradient(90deg, var(--neon), var(--green)); width: 0%; transition: width 0.3s; }
 
   /* Remote Desktop */
   .rd-toolbar {
@@ -1224,23 +1288,24 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
   /* Terminal & Protocols */
   .term-out {
-    flex: 1; background: #060911; border: 1px solid var(--border);
-    border-radius: 10px; padding: 14px; font-family: 'Cascadia Code', Consolas, monospace;
-    font-size: 13px; color: #d1fae5; overflow-y: auto; white-space: pre-wrap;
+    flex: 1; background: #0a0f1c; border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px; font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
+    font-size: 13px; color: #00ff88; overflow-y: auto; white-space: pre-wrap;
     min-height: 260px;
+    box-shadow: 0 0 15px rgba(0,255,136,0.12) inset;
   }
   .proto-tabs { display: flex; gap: 8px; flex-wrap: wrap; }
-  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
   .form-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
   .inp {
-    background: var(--bg); border: 1px solid var(--border);
-    color: var(--text); padding: 8px 10px; border-radius: 8px;
-    font-size: 13px; outline: none;
+    background: var(--panel2); border: 1px solid var(--border);
+    color: var(--text); padding: 8px 12px; border-radius: 8px;
+    font-size: 13px; outline: none; font-family: inherit;
   }
-  .inp:focus { border-color: var(--accent); }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; }
-  th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); }
-  th { color: var(--muted); font-weight: 600; }
+  .inp:focus { border-color: var(--neon); box-shadow: 0 0 10px rgba(0,246,255,0.35); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; font-family: inherit; }
+  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
+  th { color: var(--neon); font-weight: 600; }
 
   /* Modal */
   .modal-bg {
@@ -1261,15 +1326,19 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   textarea.inp { width: 100%; min-height: 90px; font-family: inherit; }
   .toast-wrap { position: fixed; bottom: 18px; right: 18px; z-index: 200; display: flex; flex-direction: column; gap: 8px; max-width: 340px; }
   .toast {
-    background: #182032; border: 1px solid var(--accent); border-left: 4px solid var(--accent);
+    background: rgba(30, 41, 59, 0.96); border: 1px solid var(--accent); border-left: 4px solid var(--neon);
     color: var(--text); padding: 10px 14px; border-radius: 10px; font-size: 13px;
-    box-shadow: 0 10px 28px rgba(0,0,0,0.45); animation: slideIn 0.2s ease-out;
+    box-shadow: 0 10px 28px rgba(0,0,0,0.55), 0 0 20px rgba(0,246,255,0.2); animation: slideIn 0.2s ease-out;
   }
-  .toast-title { font-weight: 700; color: var(--accent); font-size: 12px; margin-bottom: 2px; }
+  .toast-title { font-weight: 700; color: var(--neon); font-size: 12px; margin-bottom: 2px; }
   @keyframes slideIn { from { transform: translateX(30px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
+  @keyframes glitch { 0%,100%{transform:translate(0)} 25%{transform:translate(-2px,2px)} 75%{transform:translate(2px,-2px)} }
+  @keyframes pulseGlow { 0%,100%{box-shadow:0 0 12px rgba(0,246,255,0.3)} 50%{box-shadow:0 0 26px rgba(0,246,255,0.75)} }
 </style>
 </head>
 <body>
+  <canvas id="matrixRain" style="position:fixed;inset:0;z-index:-3;opacity:0.30;pointer-events:none;"></canvas>
+  <div class="grid-overlay" style="position:fixed;inset:0;z-index:-1;pointer-events:none;background-image:linear-gradient(rgba(0,246,255,0.055) 1px,transparent 1px),linear-gradient(90deg,rgba(0,246,255,0.055) 1px,transparent 1px);background-size:48px 48px;mask-image:radial-gradient(ellipse at 50% 40%,#000 35%,transparent 78%);-webkit-mask-image:radial-gradient(ellipse at 50% 40%,#000 35%,transparent 78%);"></div>
   <aside class="sidebar">
     <div class="brand">
       <div class="brand-logo">🦆</div>
@@ -1547,6 +1616,55 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 
 <script>
+/* ---- Matrix rain (hacker backdrop) ---- */
+(function initMatrixRain() {
+  const cv = document.getElementById('matrixRain');
+  if (!cv) return;
+  const ctx = cv.getContext('2d');
+  const CHARS = 'アイウエオカキクケコサシスセソタチツテトナニヌネノ0123456789ABCDEF$#@%&*<>/\\|=+-';
+  let cols = 0, rows = 0, drops = [], speed = [], cellW = 16, cellH = 18;
+
+  function resize() {
+    cv.width = window.innerWidth;
+    cv.height = window.innerHeight;
+    cols = Math.max(1, Math.floor(cv.width / cellW));
+    rows = Math.max(1, Math.ceil(cv.height / cellH));
+    drops = new Array(cols);
+    speed = new Array(cols);
+    for (let i = 0; i < cols; i++) {
+      drops[i] = Math.random() * -rows;
+      speed[i] = 0.5 + Math.random() * 0.9;
+    }
+  }
+
+  let last = 0;
+  function frame(ts) {
+    if (ts - last > 55) {
+      last = ts;
+      ctx.fillStyle = 'rgba(2,6,23,0.16)';
+      ctx.fillRect(0, 0, cv.width, cv.height);
+      ctx.font = cellH + 'px monospace';
+      for (let i = 0; i < cols; i++) {
+        const ch = CHARS[(Math.random() * CHARS.length) | 0];
+        const x = i * cellW;
+        const y = drops[i] * cellH;
+        // Head of the stream: bright cyan; tail: dim green
+        ctx.fillStyle = 'rgba(0,246,255,0.95)';
+        ctx.fillText(ch, x, y);
+        ctx.fillStyle = 'rgba(5,150,105,' + (0.25 + Math.random() * 0.35).toFixed(2) + ')';
+        ctx.fillText(CHARS[(Math.random() * CHARS.length) | 0], x, y - cellH * 2);
+        drops[i] += speed[i];
+        if (y > cv.height && Math.random() > 0.975) drops[i] = Math.random() * -20;
+      }
+    }
+    requestAnimationFrame(frame);
+  }
+
+  resize();
+  window.addEventListener('resize', resize);
+  requestAnimationFrame(frame);
+})();
+
 let ws = null;
 let myName = localStorage.getItem('duck_nick') || ('Device-' + Math.floor(100 + Math.random() * 900));
 document.getElementById('nickInput').value = myName;
@@ -2698,29 +2816,29 @@ def run_gui_app():
     root = tk.Tk()
     root.title(f"Duck Intranet Hub v{APP_VERSION}")
     root.geometry("620x460")
-    root.configure(bg="#0b0f19")
+    root.configure(bg="#020617")
 
     style = ttk.Style()
     style.theme_use("clam")
 
-    header = tk.Frame(root, bg="#121826", pady=12, padx=16)
+    header = tk.Frame(root, bg="#0f172a", pady=12, padx=16)
     header.pack(fill="x")
-    tk.Label(header, text="🦆 DUCK INTRANET HUB", font=("Segoe UI", 15, "bold"), fg="#f59e0b", bg="#121826").pack(side="left")
-    tk.Label(header, text=f"● ONLINE (Port {state.port})", font=("Segoe UI", 10, "bold"), fg="#10b981", bg="#121826").pack(side="right")
+    tk.Label(header, text="🦆 DUCK INTRANET HUB", font=("Consolas", 15, "bold"), fg="#00f6ff", bg="#0f172a").pack(side="left")
+    tk.Label(header, text=f"● ONLINE (Port {state.port})", font=("Consolas", 10, "bold"), fg="#10b981", bg="#0f172a").pack(side="right")
 
-    info = tk.Frame(root, bg="#0b0f19", padx=16, pady=10)
+    info = tk.Frame(root, bg="#020617", padx=16, pady=10)
     info.pack(fill="x")
-    tk.Label(info, text=f"Browser URL:  {duck_url}   (or {ip_url})", font=("Segoe UI", 11), fg="#e6edf7", bg="#0b0f19").pack(anchor="w")
+    tk.Label(info, text=f"Browser URL:  {duck_url}   (or {ip_url})", font=("Consolas", 11), fg="#e6edf7", bg="#020617").pack(anchor="w")
     hosts_lbl = tk.Label(
         info,
         text=("✓ Hostname 'duck' is registered in Windows hosts" if hosts_ok else "⚠ Click 'Register duck Hostname' once so http://duck always resolves locally"),
-        font=("Segoe UI", 9),
-        fg=("#10b981" if hosts_ok else "#f59e0b"),
-        bg="#0b0f19",
+        font=("Consolas", 9),
+        fg=("#10b981" if hosts_ok else "#00f6ff"),
+        bg="#020617",
     )
     hosts_lbl.pack(anchor="w", pady=(4, 0))
 
-    btns = tk.Frame(root, bg="#0b0f19", padx=16, pady=6)
+    btns = tk.Frame(root, bg="#020617", padx=16, pady=6)
     btns.pack(fill="x")
 
     def open_dash():
@@ -2734,7 +2852,7 @@ def run_gui_app():
             elevate_register_hosts()
             root.after(1500, lambda: hosts_lbl.config(
                 text=("✓ Hostname 'duck' is registered in Windows hosts" if check_duck_hosts_configured() else "⚠ Elevation cancelled or pending"),
-                fg=("#10b981" if check_duck_hosts_configured() else "#f59e0b")
+                fg=("#10b981" if check_duck_hosts_configured() else "#00f6ff")
             ))
 
     def copy_url():
@@ -2750,7 +2868,7 @@ def run_gui_app():
         elif shutil.which("xdg-open"):
             subprocess.Popen(["xdg-open", str(FILES_DIR)])
 
-    tunnel_lbl = tk.Label(info, text="Internet Tunnel: Offline", font=("Segoe UI", 9), fg="#8b9bb4", bg="#0b0f19")
+    tunnel_lbl = tk.Label(info, text="Internet Tunnel: Offline", font=("Consolas", 9), fg="#8b9bb4", bg="#020617")
     tunnel_lbl.pack(anchor="w", pady=(2, 0))
 
     def toggle_gui_tunnel():
@@ -2759,11 +2877,11 @@ def run_gui_app():
         else:
             state.tunnel.start(state.port)
 
-    tk.Button(btns, text="🌐 Open Dashboard", command=open_dash, bg="#f59e0b", fg="#0b0f19", font=("Segoe UI", 10, "bold"), relief="flat", padx=12, pady=6).pack(side="left", padx=(0, 8))
-    tk.Button(btns, text="☁️ Internet Tunnel", command=toggle_gui_tunnel, bg="#10b981", fg="#0b0f19", font=("Segoe UI", 10, "bold"), relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 8))
-    tk.Button(btns, text="🔧 Register 'duck'", command=do_register, bg="#3b82f6", fg="#ffffff", font=("Segoe UI", 10), relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 8))
-    tk.Button(btns, text="📋 Copy LAN", command=copy_url, bg="#182032", fg="#e6edf7", font=("Segoe UI", 10), relief="flat", padx=8, pady=6).pack(side="left", padx=(0, 8))
-    tk.Button(btns, text="📁 Files", command=open_folder, bg="#182032", fg="#e6edf7", font=("Segoe UI", 10), relief="flat", padx=8, pady=6).pack(side="left")
+    tk.Button(btns, text="🌐 Open Dashboard", command=open_dash, bg="#00f6ff", fg="#020617", font=("Consolas", 10, "bold"), relief="flat", padx=12, pady=6).pack(side="left", padx=(0, 8))
+    tk.Button(btns, text="☁️ Internet Tunnel", command=toggle_gui_tunnel, bg="#10b981", fg="#020617", font=("Consolas", 10, "bold"), relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 8))
+    tk.Button(btns, text="🔧 Register 'duck'", command=do_register, bg="#3b82f6", fg="#ffffff", font=("Consolas", 10), relief="flat", padx=10, pady=6).pack(side="left", padx=(0, 8))
+    tk.Button(btns, text="📋 Copy LAN", command=copy_url, bg="#1e293b", fg="#e6edf7", font=("Consolas", 10), relief="flat", padx=8, pady=6).pack(side="left", padx=(0, 8))
+    tk.Button(btns, text="📁 Files", command=open_folder, bg="#1e293b", fg="#e6edf7", font=("Consolas", 10), relief="flat", padx=8, pady=6).pack(side="left")
 
     log_box = scrolledtext.ScrolledText(root, bg="#060911", fg="#d1fae5", font=("Consolas", 9), relief="flat", padx=10, pady=10)
     log_box.pack(fill="both", expand=True, padx=16, pady=(6, 14))
