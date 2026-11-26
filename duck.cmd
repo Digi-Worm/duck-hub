@@ -54,7 +54,8 @@ except ImportError:
     HAS_TK = False
 
 APP_NAME = "Duck"
-APP_VERSION = "1.6.1"
+APP_VERSION = "2.0.0"
+START_TIME = time.time()
 
 def _resolve_script_path():
     try:
@@ -123,6 +124,76 @@ def get_lan_ips():
 
 def get_primary_ip():
     return get_lan_ips()[0]
+
+
+def get_system_telemetry(state):
+    """Collect host CPU/RAM/disk/uptime telemetry using stdlib + OS APIs."""
+    mem_total = mem_used = 0
+    if os.name == "nt":
+        class MEMORYSTATUSEX(ctypes.Structure):
+            _fields_ = [
+                ("dwLength", ctypes.c_ulong),
+                ("dwMemoryLoad", ctypes.c_ulong),
+                ("ullTotalPhys", ctypes.c_ulonglong),
+                ("ullAvailPhys", ctypes.c_ulonglong),
+                ("ullTotalPageFile", ctypes.c_ulonglong),
+                ("ullAvailPageFile", ctypes.c_ulonglong),
+                ("ullTotalVirtual", ctypes.c_ulonglong),
+                ("ullAvailVirtual", ctypes.c_ulonglong),
+                ("ullAvailExtendedVirtual", ctypes.c_ulonglong),
+            ]
+        ms = MEMORYSTATUSEX()
+        ms.dwLength = ctypes.sizeof(MEMORYSTATUSEX)
+        if ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(ms)):
+            mem_total = ms.ullTotalPhys
+            mem_used = ms.ullTotalPhys - ms.ullAvailPhys
+    else:
+        try:
+            info = {}
+            for line in Path("/proc/meminfo").read_text().splitlines():
+                k, _, v = line.partition(":")
+                info[k.strip()] = int(v.strip().split()[0]) * 1024
+            mem_total = info.get("MemTotal", 0)
+            mem_avail = info.get("MemAvailable", info.get("MemFree", 0))
+            mem_used = max(0, mem_total - mem_avail)
+        except Exception:
+            pass
+
+    disk = shutil.disk_usage(str(DATA_DIR))
+    with state.clients_lock:
+        online = sum(1 for c in state.clients.values() if not c.closed)
+    files_cnt = sum(1 for p in FILES_DIR.iterdir() if p.is_file())
+    return {
+        "version": APP_VERSION,
+        "host": socket.gethostname(),
+        "os": f"{platform.system()} {platform.release()}",
+        "arch": platform.machine(),
+        "python": platform.python_version(),
+        "uptime_sec": int(time.time() - START_TIME),
+        "mem_total_gb": round(mem_total / (1024 ** 3), 2),
+        "mem_used_gb": round(mem_used / (1024 ** 3), 2),
+        "mem_pct": round((mem_used / mem_total) * 100, 1) if mem_total else 0,
+        "disk_total_gb": round(disk.total / (1024 ** 3), 1),
+        "disk_free_gb": round(disk.free / (1024 ** 3), 1),
+        "disk_pct": round(((disk.total - disk.free) / disk.total) * 100, 1) if disk.total else 0,
+        "lan_ips": get_lan_ips(),
+        "clients_online": online,
+        "files_count": files_cnt,
+    }
+
+
+def send_wol_packet(mac: str):
+    """Send a Wake-on-LAN UDP magic packet to broadcast port 9."""
+    clean = re.sub(r"[^0-9a-fA-F]", "", mac or "")
+    if len(clean) != 12:
+        raise ValueError("Invalid MAC address")
+    payload = b"\xff" * 6 + bytes.fromhex(clean) * 16
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
+        s.sendto(payload, ("255.255.255.255", 9))
+    finally:
+        s.close()
 
 
 def is_admin():
@@ -1040,6 +1111,9 @@ class DuckState:
         self.chat_lock = threading.Lock()
         self.messages = self._load_chat()
         self.clipboard = self._load_clipboard()
+        self.clip_history = []
+        if self.clipboard:
+            self.clip_history.append({"text": self.clipboard, "sender": "Saved", "ts": ""})
         self.discovery = IntranetDiscovery(log_fn, lambda: self.port)
         self.tunnel = TunnelManager(log_fn, lambda: self.broadcast({"type": "tunnel", "tunnel": self.tunnel.state_dict()}))
         self.latest_update = None
@@ -1117,8 +1191,22 @@ class DuckState:
                 pass
             raise
 
-        self.log(f"Updated {cur_path.name} from GitHub ({GITHUB_REPO}). Restart Duck to apply.")
-        return {"ok": True, "message": "Updated! Restart duck.cmd to run the new version."}
+        self.log(f"Updated {cur_path.name} from GitHub ({GITHUB_REPO}). Restarting Duck...")
+
+        def _deferred_restart():
+            time.sleep(0.8)
+            try:
+                if os.name == "nt":
+                    subprocess.Popen(["cmd", "/c", "start", "", str(cur_path)], creationflags=0x08000000)
+                else:
+                    subprocess.Popen([str(cur_path)], start_new_session=True)
+            except Exception as e:
+                self.log(f"Auto-restart failed: {e}")
+                return
+            os._exit(0)
+
+        threading.Thread(target=_deferred_restart, daemon=True).start()
+        return {"ok": True, "restarting": True, "message": "Updated! Restarting Duck automatically..."}
 
     def _load_chat(self):
         try:
@@ -1152,11 +1240,32 @@ class DuckState:
 
     def set_clipboard(self, text: str, sender: str):
         self.clipboard = text
+        ts = datetime.now().strftime("%H:%M:%S")
+        if text.strip():
+            self.clip_history = [c for c in self.clip_history if c["text"] != text]
+            self.clip_history.insert(0, {"text": text, "sender": sender, "ts": ts})
+            self.clip_history = self.clip_history[:8]
         try:
             CLIPBOARD_FILE.write_text(text, encoding="utf-8")
         except Exception:
             pass
-        self.broadcast({"type": "clipboard", "text": text, "sender": sender})
+        self.broadcast({"type": "clipboard", "text": text, "sender": sender, "history": self.clip_history})
+
+    def toggle_reaction(self, msg_id: str, emoji: str, sender: str):
+        with self.chat_lock:
+            for m in self.messages:
+                if m.get("id") == msg_id:
+                    reacts = m.setdefault("reactions", {})
+                    users = reacts.setdefault(emoji, [])
+                    if sender in users:
+                        users.remove(sender)
+                        if not users:
+                            del reacts[emoji]
+                    else:
+                        users.append(sender)
+                    self._save_chat()
+                    self.broadcast({"type": "reaction", "msg_id": msg_id, "reactions": reacts})
+                    break
 
     def add_message(self, msg: dict):
         with self.chat_lock:
@@ -1211,106 +1320,84 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 <title>Duck — Intranet Hub</title>
 <style>
   :root {
-    --bg: #020617;
-    --panel: #0f172a;
-    --panel2: #1e293b;
-    --border: #334155;
-    --text: #a5b4fc;
-    --muted: #64748b;
-    --accent: #06b6d4;
-    --accent2: #8b5cf6;
+    --bg: #0b0f17;
+    --panel: #111827;
+    --panel2: #1a2234;
+    --border: rgba(255, 255, 255, 0.08);
+    --border-strong: rgba(255, 255, 255, 0.16);
+    --text: #f1f5f9;
+    --text-soft: #cbd5e1;
+    --muted: #94a3b8;
+    --accent: #38bdf8;
+    --accent2: #818cf8;
     --green: #10b981;
-    --red: #ef4444;
-    --neon: #00f6ff;
-    --matrix: #059669;
-    --holo: rgba(100, 100, 255, 0.15);
+    --red: #f43f5e;
+    --amber: #f59e0b;
+    --neon: #38bdf8;
+    --matrix: #10b981;
+    --mono: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', Consolas, monospace;
   }
   * { box-sizing: border-box; margin: 0; padding: 0; }
   body {
-    font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace;
-    background: var(--bg);
+    font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    background: radial-gradient(circle at 15% 0%, rgba(56,189,248,0.06), transparent 40%),
+                radial-gradient(circle at 85% 100%, rgba(129,140,248,0.06), transparent 40%),
+                var(--bg);
     color: var(--text);
     height: 100vh;
     display: flex;
     overflow: hidden;
-    position: relative;
+    -webkit-font-smoothing: antialiased;
   }
-  body::before {
-    content: '';
-    position: absolute;
-    inset: 0;
-    z-index: -2;
-    background: linear-gradient(135deg, transparent 45%, var(--holo) 50%), 
-                radial-gradient(circle at 50% 50%, rgba(0,255,136,0.04) 0%, transparent 35%),
-                #020617;
-  }
-  body::after {
-    content: '';
-    position: absolute;
-    inset: 0;
-    z-index: -1;
-    pointer-events: none;
-    background: repeating-linear-gradient(
-      0deg,
-      transparent,
-      transparent calc(1px + 0.5px),
-      rgba(0,255,136,0.03) calc(1px + 0.5px),
-      rgba(0,255,136,0.03) calc(2px + 0.5px)
-    );
-  }
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 99px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(255,255,255,0.22); }
+
   .sidebar {
-    width: 240px;
+    width: 248px;
     background: var(--panel);
     border-right: 1px solid var(--border);
     display: flex;
     flex-direction: column;
     padding: 16px 12px;
-    gap: 8px;
+    gap: 4px;
     flex-shrink: 0;
   }
   .brand {
     display: flex;
     align-items: center;
-    gap: 10px;
-    padding: 6px 10px 14px;
+    gap: 12px;
+    padding: 4px 8px 14px;
     border-bottom: 1px solid var(--border);
-    margin-bottom: 6px;
+    margin-bottom: 8px;
   }
   .brand-logo {
-    width: 40px; height: 40px;
-    border-radius: 12px;
-    background: linear-gradient(45deg, var(--neon), var(--matrix));
+    width: 38px; height: 38px;
+    border-radius: 10px;
+    background: linear-gradient(135deg, #38bdf8, #818cf8);
     display: grid; place-items: center;
-    font-size: 22px; font-weight: 900; color: #020617;
-    box-shadow: 0 0 20px var(--neon);
-    animation: rot 4s linear infinite;
+    font-size: 20px;
+    box-shadow: 0 4px 14px rgba(56, 189, 248, 0.25);
+    flex-shrink: 0;
   }
-  @keyframes rot { 0%,100%{transform: rotate(0deg)} 50%{transform: rotate(180deg)} }
-  .brand-title {
-    font-weight: 800; font-size: 18px; letter-spacing: 0.5px;
-    background: linear-gradient(90deg, var(--accent), var(--neon));
-    -webkit-background-clip: text;
-    -webkit-text-fill-color: transparent;
-  }
-  .brand-sub { font-size: 12px; color: var(--green); font-family: monospace; }
+  .brand-title { font-weight: 700; font-size: 16px; letter-spacing: -0.02em; color: var(--text); }
+  .brand-sub { font-size: 11px; color: var(--green); font-weight: 500; margin-top: 1px; }
   .nav-btn {
     display: flex; align-items: center; gap: 10px;
-    padding: 10px 12px; border-radius: 8px;
-    background: rgba(255,255,255,0.05); border: 1px solid var(--border);
+    padding: 9px 12px; border-radius: 8px;
+    background: transparent; border: 1px solid transparent;
     color: var(--muted);
-    cursor: pointer; font-size: 14px; font-weight: 600;
-    transition: all 0.2s; text-align: left;
+    cursor: pointer; font-size: 13.5px; font-weight: 500;
+    transition: background 0.15s, color 0.15s, border-color 0.15s;
+    text-align: left; font-family: inherit;
   }
-  .nav-btn:hover { 
-    background: var(--accent); color: #020617;
-    box-shadow: 0 0 20px var(--accent);
-    transform: translateX(2px);
-  }
-  .nav-btn.active { 
-    background: rgba(6,182,212,0.2); 
-    border-color: var(--neon); 
+  .nav-btn:hover { background: rgba(255,255,255,0.05); color: var(--text); }
+  .nav-btn.active {
+    background: rgba(56, 189, 248, 0.12);
+    border-color: rgba(56, 189, 248, 0.28);
     color: var(--accent);
-    box-shadow: 0 0 20px var(--neon);
+    font-weight: 600;
   }
   .sidebar-footer {
     margin-top: auto;
@@ -1318,231 +1405,192 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     border-top: 1px solid var(--border);
     font-size: 12px;
     color: var(--muted);
-    display: flex; flex-direction: column; gap: 6px;
+    display: flex; flex-direction: column; gap: 8px;
   }
   .nick-input {
     background: var(--bg); border: 1px solid var(--border);
-    color: var(--text); padding: 6px 8px; border-radius: 6px;
-    font-size: 12px; width: 100%;
+    color: var(--text); padding: 7px 10px; border-radius: 8px;
+    font-size: 12.5px; width: 100%; outline: none; font-family: inherit;
   }
-  .main {
-    flex: 1;
-    display: flex;
-    flex-direction: column;
-    overflow: hidden;
-  }
+  .nick-input:focus { border-color: var(--accent); }
+  .main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
   .topbar {
     height: 54px;
-    background: var(--panel);
+    background: rgba(17, 24, 39, 0.85);
+    backdrop-filter: blur(12px);
     border-bottom: 1px solid var(--border);
     display: flex; align-items: center; justify-content: space-between;
-    padding: 0 20px;
-    flex-shrink: 0;
+    padding: 0 20px; gap: 12px; flex-shrink: 0;
   }
-  .topbar-info { display: flex; align-items: center; gap: 12px; font-size: 13px; color: var(--muted); }
+  .topbar-info { display: flex; align-items: center; gap: 8px; font-size: 12.5px; color: var(--muted); flex-wrap: wrap; }
   .pill {
     background: var(--panel2); border: 1px solid var(--border);
-    padding: 4px 10px; border-radius: 999px; font-size: 12px; color: var(--text);
+    padding: 4px 10px; border-radius: 999px; font-size: 12px; color: var(--text-soft);
+    font-weight: 500;
   }
-  .pill.online { border-color: rgba(16, 185, 129, 0.4); color: var(--green); }
+  .pill.online { border-color: rgba(16, 185, 129, 0.35); color: var(--green); background: rgba(16, 185, 129, 0.08); }
   .content { flex: 1; overflow: hidden; display: none; }
   .content.active { display: flex; flex-direction: column; }
 
   /* Chat */
-  .chat-wrap { display: flex; flex: 1; overflow: hidden; }
-  .chat-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; }
+  .chat-wrap { display: flex; flex: 1; overflow: hidden; position: relative; }
+  .chat-main { flex: 1; display: flex; flex-direction: column; overflow: hidden; min-width: 0; }
+  .chat-main.drag-over { outline: 2px dashed var(--accent); outline-offset: -6px; background: rgba(56,189,248,0.04); }
   .chat-messages {
     flex: 1; overflow-y: auto; padding: 18px 22px;
-    display: flex; flex-direction: column; gap: 12px;
+    display: flex; flex-direction: column; gap: 10px;
   }
   .msg {
-    background: rgba(15, 23, 42, 0.85); border: 1px solid var(--border);
-    padding: 12px 16px; border-radius: 12px; max-width: 78%;
-    align-self: flex-start;
-    backdrop-filter: blur(10px);
-    box-shadow: 0 0 15px rgba(0,0,0,0.4);
+    background: var(--panel); border: 1px solid var(--border);
+    padding: 10px 14px; border-radius: 12px; max-width: 76%;
+    align-self: flex-start; position: relative;
+    transition: border-color 0.15s;
   }
-  .msg.me { align-self: flex-end; background: rgba(30, 58, 95, 0.9); border-color: var(--neon); box-shadow: 0 0 18px rgba(0,246,255,0.25); }
-  .msg-head { display: flex; gap: 10px; align-items: baseline; margin-bottom: 6px; font-size: 12px; }
-  .msg-sender { font-weight: 700; color: var(--accent); }
-  .msg.me .msg-sender { color: var(--neon); }
-  .msg-meta { color: var(--muted); font-size: 11px; }
-  .msg-body { font-size: 14px; line-height: 1.45; white-space: pre-wrap; word-break: break-word; }
+  .msg:hover { border-color: var(--border-strong); }
+  .msg.me { align-self: flex-end; background: rgba(56, 189, 248, 0.1); border-color: rgba(56, 189, 248, 0.28); }
+  .msg.dm { border-color: rgba(129, 140, 248, 0.45); background: rgba(129, 140, 248, 0.1); }
+  .msg-head { display: flex; gap: 8px; align-items: center; margin-bottom: 4px; font-size: 12px; }
+  .msg-sender { font-weight: 600; color: var(--accent); }
+  .msg.me .msg-sender { color: #7dd3fc; }
+  .msg-meta { color: var(--muted); font-size: 11px; font-family: var(--mono); }
+  .msg-body { font-size: 13.5px; line-height: 1.5; white-space: pre-wrap; word-break: break-word; color: var(--text); }
+  .msg-body code { background: rgba(0,0,0,0.35); padding: 1px 5px; border-radius: 4px; font-family: var(--mono); font-size: 12.5px; color: #7dd3fc; }
+  .msg-body pre { background: #070a10; border: 1px solid var(--border); border-radius: 8px; padding: 10px; margin-top: 6px; overflow-x: auto; font-family: var(--mono); font-size: 12.5px; color: #e2e8f0; }
+  .msg-actions { display: flex; gap: 4px; margin-top: 6px; align-items: center; flex-wrap: wrap; }
+  .react-btn {
+    background: rgba(255,255,255,0.04); border: 1px solid var(--border); color: var(--muted);
+    border-radius: 999px; padding: 2px 7px; font-size: 11px; cursor: pointer; transition: all 0.12s;
+  }
+  .react-btn:hover { background: rgba(255,255,255,0.1); color: var(--text); }
+  .react-btn.active { border-color: var(--accent); color: var(--accent); background: rgba(56,189,248,0.12); }
   .msg-attach {
     margin-top: 8px; padding: 8px 10px; background: var(--bg);
     border: 1px solid var(--border); border-radius: 8px;
-    display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12px;
+    display: flex; align-items: center; justify-content: space-between; gap: 10px; font-size: 12.5px;
   }
-  .msg-attach img { max-width: 280px; max-height: 200px; border-radius: 6px; display: block; margin-top: 4px; }
+  .msg-attach img { max-width: 280px; max-height: 200px; border-radius: 6px; display: block; margin-top: 6px; }
   .chat-input-bar {
     padding: 12px 18px; background: var(--panel); border-top: 1px solid var(--border);
-    display: flex; gap: 10px; align-items: center;
+    display: flex; gap: 8px; align-items: center;
   }
   .chat-input {
     flex: 1; background: var(--bg); border: 1px solid var(--border);
-    color: var(--text); padding: 10px 14px; border-radius: 10px;
-    font-size: 14px; outline: none;
+    color: var(--text); padding: 9px 14px; border-radius: 10px;
+    font-size: 13.5px; outline: none; font-family: inherit;
   }
   .chat-input:focus { border-color: var(--accent); }
   .chat-side {
-    width: 260px; background: var(--panel); border-left: 1px solid var(--border);
-    padding: 14px; display: flex; flex-direction: column; gap: 14px; overflow-y: auto;
+    width: 280px; background: var(--panel); border-left: 1px solid var(--border);
+    padding: 14px; display: flex; flex-direction: column; gap: 12px; overflow-y: auto; flex-shrink: 0;
   }
   .card {
     background: var(--panel2); border: 1px solid var(--border);
     border-radius: 12px; padding: 14px;
   }
-  .card h3 { font-size: 13px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 10px; }
+  .card h3 { font-size: 11.5px; color: var(--muted); text-transform: uppercase; letter-spacing: 0.06em; font-weight: 600; margin-bottom: 10px; }
   .btn {
-    background: linear-gradient(135deg, var(--neon), var(--accent)); color: #020617; border: none;
-    padding: 10px 16px; border-radius: 8px; font-weight: 700;
-    cursor: pointer; font-size: 13px; transition: all 0.2s; position: relative;
-    overflow: hidden; font-family: inherit;
-    box-shadow: 0 4px 15px rgba(6,182,212,0.35);
+    background: var(--accent); color: #082f49; border: none;
+    padding: 8px 14px; border-radius: 8px; font-weight: 600;
+    cursor: pointer; font-size: 13px; transition: all 0.15s;
+    font-family: inherit; display: inline-flex; align-items: center; justify-content: center; gap: 6px;
   }
-  .btn:hover { opacity: 0.95; transform: translateY(-2px); box-shadow: 0 8px 25px var(--neon); }
+  .btn:hover { filter: brightness(1.08); transform: translateY(-1px); }
   .btn:active { transform: translateY(0); }
-  .btn::after {
-    content: ''; position: absolute; top: 0; left: -100%;
-    width: 100%; height: 100%;
-    background: linear-gradient(90deg, transparent, rgba(255,255,255,0.35), transparent);
-    transition: left 0.5s;
-  }
-  .btn:hover::after { left: 100%; }
-  .btn.secondary { background: var(--panel2); color: var(--text); border: 1px solid var(--border); box-shadow: none; }
-  .btn.blue { background: linear-gradient(135deg, var(--accent2), var(--accent)); color: #fff; }
-  .btn.danger { background: linear-gradient(135deg, var(--red), #dc2626); color: #fff; }
-  .btn.sm { padding: 6px 12px; font-size: 12px; }
+  .btn.secondary { background: rgba(255,255,255,0.06); color: var(--text-soft); border: 1px solid var(--border); }
+  .btn.secondary:hover { background: rgba(255,255,255,0.1); color: var(--text); }
+  .btn.blue { background: var(--accent2); color: #fff; }
+  .btn.danger { background: var(--red); color: #fff; }
+  .btn.sm { padding: 5px 10px; font-size: 12px; border-radius: 7px; }
 
   /* Files */
   .pad { padding: 20px; overflow-y: auto; flex: 1; display: flex; flex-direction: column; gap: 16px; }
   .dropzone {
-    border: 2px dashed var(--border); border-radius: 14px;
-    padding: 32px; text-align: center; background: linear-gradient(135deg, var(--panel), var(--panel2));
-    cursor: pointer; transition: all 0.3s;
-    box-shadow: 0 0 20px rgba(0,0,0,0.4);
+    border: 1.5px dashed var(--border-strong); border-radius: 14px;
+    padding: 28px; text-align: center; background: var(--panel);
+    cursor: pointer; transition: all 0.2s;
   }
-  .dropzone.drag { 
-    border-color: var(--neon); 
-    background: linear-gradient(135deg, rgba(6,182,212,0.12), var(--panel));
-    box-shadow: 0 0 30px var(--neon);
-  }
-  .file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 16px; }
+  .dropzone:hover, .dropzone.drag { border-color: var(--accent); background: rgba(56, 189, 248, 0.06); }
+  .file-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(250px, 1fr)); gap: 12px; }
   .file-card {
     background: var(--panel); border: 1px solid var(--border);
     border-radius: 12px; padding: 14px; display: flex; flex-direction: column; gap: 8px;
-    transition: all 0.2s;
+    transition: border-color 0.15s, transform 0.15s;
   }
-  .file-card:hover { transform: translateY(-3px); box-shadow: 0 8px 30px rgba(6,182,212,0.35); border-color: var(--accent); }
-  .file-name { font-weight: 600; font-size: 14px; word-break: break-all; }
-  .file-meta { font-size: 12px; color: var(--muted); font-family: monospace; }
-  .file-actions { display: flex; gap: 8px; flex-wrap: wrap; margin-top: auto; }
+  .file-card:hover { transform: translateY(-2px); border-color: rgba(56,189,248,0.4); }
+  .file-name { font-weight: 600; font-size: 13.5px; word-break: break-all; color: var(--text); }
+  .file-meta { font-size: 11.5px; color: var(--muted); font-family: var(--mono); }
+  .file-actions { display: flex; gap: 6px; flex-wrap: wrap; margin-top: auto; }
   .progress-wrap { height: 6px; background: var(--bg); border-radius: 4px; overflow: hidden; display: none; margin-top: 10px; }
-  .progress-bar { height: 100%; background: linear-gradient(90deg, var(--neon), var(--green)); width: 0%; transition: width 0.3s; }
+  .progress-bar { height: 100%; background: linear-gradient(90deg, var(--accent), var(--green)); width: 0%; transition: width 0.2s; }
 
   /* Remote Desktop */
   .rd-toolbar {
     padding: 10px 18px; background: var(--panel); border-bottom: 1px solid var(--border);
-    display: flex; gap: 10px; align-items: center; flex-wrap: wrap;
+    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
   }
-  .rd-stage {
-    flex: 1; background: #05070c; display: grid; place-items: center;
-    overflow: auto; padding: 10px; position: relative;
-  }
-  #screenImg {
-    max-width: 100%; max-height: 100%; border: 1px solid var(--border);
-    border-radius: 6px; cursor: crosshair; user-select: none;
-  }
+  .rd-stage { flex: 1; background: #05070c; display: grid; place-items: center; overflow: auto; padding: 10px; position: relative; }
+  #screenImg { max-width: 100%; max-height: 100%; border: 1px solid var(--border); border-radius: 8px; cursor: crosshair; user-select: none; }
 
   /* Terminal & Protocols */
   .term-out {
-    flex: 1; background: #0a0f1c; border: 1px solid var(--border);
-    border-radius: 10px; padding: 14px; font-family: 'JetBrains Mono', 'Fira Code', Consolas, monospace;
-    font-size: 13px; color: #00ff88; overflow-y: auto; white-space: pre-wrap;
-    min-height: 260px;
-    box-shadow: 0 0 15px rgba(0,255,136,0.12) inset;
+    flex: 1; background: #070a10; border: 1px solid var(--border);
+    border-radius: 10px; padding: 14px; font-family: var(--mono);
+    font-size: 12.5px; color: #34d399; overflow-y: auto; white-space: pre-wrap; min-height: 260px;
   }
   .proto-tabs { display: flex; gap: 8px; flex-wrap: wrap; }
-  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 16px; }
+  .grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)); gap: 14px; }
+  .grid-4 { display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 12px; }
+  .stat-card { background: var(--panel); border: 1px solid var(--border); border-radius: 12px; padding: 14px; }
+  .stat-val { font-size: 22px; font-weight: 700; color: var(--text); margin-top: 4px; font-family: var(--mono); }
+  .stat-sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
   .form-row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
   .inp {
-    background: var(--panel2); border: 1px solid var(--border);
-    color: var(--text); padding: 8px 12px; border-radius: 8px;
+    background: var(--bg); border: 1px solid var(--border);
+    color: var(--text); padding: 8px 11px; border-radius: 8px;
     font-size: 13px; outline: none; font-family: inherit;
   }
-  .inp:focus { border-color: var(--neon); box-shadow: 0 0 10px rgba(0,246,255,0.35); }
-  table { width: 100%; border-collapse: collapse; font-size: 13px; font-family: inherit; }
-  th, td { text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
-  th { color: var(--neon); font-weight: 600; }
+  .inp:focus { border-color: var(--accent); }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 9px 12px; border-bottom: 1px solid var(--border); }
+  th { color: var(--muted); font-weight: 600; font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.04em; }
 
-  /* Modal */
-  .modal-bg {
-    position: fixed; inset: 0; background: rgba(0,0,0,0.75);
-    display: none; place-items: center; z-index: 99; padding: 20px;
-  }
+  /* Modal & Toast */
+  .modal-bg { position: fixed; inset: 0; background: rgba(0,0,0,0.72); backdrop-filter: blur(4px); display: none; place-items: center; z-index: 99; padding: 20px; }
   .modal-bg.open { display: grid; }
-  .modal-box {
-    background: var(--panel); border: 1px solid var(--border);
-    border-radius: 14px; max-width: 900px; width: 100%; max-height: 85vh;
-    display: flex; flex-direction: column; overflow: hidden;
-  }
-  .modal-head {
-    padding: 12px 16px; border-bottom: 1px solid var(--border);
-    display: flex; justify-content: space-between; align-items: center;
-  }
+  .modal-box { background: var(--panel); border: 1px solid var(--border-strong); border-radius: 14px; max-width: 900px; width: 100%; max-height: 85vh; display: flex; flex-direction: column; overflow: hidden; box-shadow: 0 20px 60px rgba(0,0,0,0.6); }
+  .modal-head { padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; justify-content: space-between; align-items: center; }
   .modal-body { padding: 16px; overflow: auto; flex: 1; }
   textarea.inp { width: 100%; min-height: 90px; font-family: inherit; }
   .toast-wrap { position: fixed; bottom: 18px; right: 18px; z-index: 200; display: flex; flex-direction: column; gap: 8px; max-width: 340px; }
   .toast {
-    background: rgba(30, 41, 59, 0.96); border: 1px solid var(--accent); border-left: 4px solid var(--neon);
-    color: var(--text); padding: 10px 14px; border-radius: 10px; font-size: 13px;
-    box-shadow: 0 10px 28px rgba(0,0,0,0.55), 0 0 20px rgba(0,246,255,0.2); animation: slideIn 0.2s ease-out;
+    background: var(--panel2); border: 1px solid var(--border-strong); border-left: 3px solid var(--accent);
+    color: var(--text); padding: 10px 14px; border-radius: 10px; font-size: 12.5px;
+    box-shadow: 0 10px 28px rgba(0,0,0,0.5); animation: slideIn 0.18s ease-out;
   }
-  .toast-title { font-weight: 700; color: var(--neon); font-size: 12px; margin-bottom: 2px; }
-  @keyframes slideIn { from { transform: translateX(30px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
-  @keyframes glitch { 0%,100%{transform:translate(0)} 25%{transform:translate(-2px,2px)} 75%{transform:translate(2px,-2px)} }
-  @keyframes pulseGlow { 0%,100%{box-shadow:0 0 12px rgba(0,246,255,0.3)} 50%{box-shadow:0 0 26px rgba(0,246,255,0.75)} }
+  .toast-title { font-weight: 600; color: var(--accent); font-size: 12px; margin-bottom: 2px; }
+  @keyframes slideIn { from { transform: translateX(24px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
 
-  /* Group Call (in chat) */
-  .call-tile { position: relative; background: #020617; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; aspect-ratio: 16/9; min-height: 140px; }
-  .call-tile video { width: 100%; height: 100%; object-fit: cover; display: block; background: #020617; }
-  .call-tile-label { position: absolute; bottom: 6px; left: 6px; font-size: 11px; font-weight: 700; color: #fff; text-shadow: 0 0 6px rgba(0,0,0,0.8); pointer-events: none; z-index: 2; }
+  /* Group Call */
+  .call-tile { position: relative; background: #070a10; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; aspect-ratio: 16/9; min-height: 140px; }
+  .call-tile video { width: 100%; height: 100%; object-fit: cover; display: block; background: #070a10; }
+  .call-tile-label { position: absolute; bottom: 6px; left: 6px; font-size: 11px; font-weight: 600; color: #fff; background: rgba(0,0,0,0.65); padding: 2px 7px; border-radius: 6px; pointer-events: none; z-index: 2; }
 
-  /* Mobile responsiveness */
   @media (max-width: 768px) {
     body { flex-direction: column; }
-    .sidebar { width: 100%; height: auto; border-right: none; border-bottom: 1px solid var(--border); padding: 10px 8px; flex-direction: row; overflow-x: auto; gap: 6px; }
-    .sidebar .brand { border: none; margin-bottom: 0; padding: 6px 8px; }
+    .sidebar { width: 100%; height: auto; border-right: none; border-bottom: 1px solid var(--border); padding: 8px; flex-direction: row; overflow-x: auto; gap: 6px; }
+    .sidebar .brand { border: none; margin-bottom: 0; padding: 4px 8px; }
     .sidebar .brand-title { font-size: 14px; }
-    .sidebar .brand-sub { display: none; }
-    .sidebar .nav-btn { white-space: nowrap; padding: 8px 10px; font-size: 12px; gap: 6px; flex-shrink: 0; }
-    .sidebar .sidebar-footer { display: none; }
-    .main { flex: none; height: calc(100vh - 110px); min-height: 400px; }
-    .topbar { padding: 0 10px; height: 44px; }
-    .topbar-info { gap: 6px; font-size: 11px; }
-    .topbar-info .pill { padding: 3px 8px; font-size: 11px; }
-    .chat-wrap { flex-direction: column; height: 100%; }
-    .chat-side { width: 100%; height: 200px; border-left: none; border-top: 1px solid var(--border); }
-    .chat-main { flex: 1; }
-    .call-preview { grid-template-columns: 1fr; }
+    .sidebar .brand-sub, .sidebar .sidebar-footer { display: none; }
+    .sidebar .nav-btn { white-space: nowrap; padding: 7px 10px; font-size: 12px; flex-shrink: 0; }
+    .main { flex: 1; min-height: 0; }
+    .topbar { padding: 8px 12px; height: auto; flex-wrap: wrap; }
+    .chat-wrap { flex-direction: column; }
+    .chat-side { width: 100%; height: 190px; border-left: none; border-top: 1px solid var(--border); }
     .grid-2 { grid-template-columns: 1fr; }
-    .call-controls { gap: 6px; }
-    .btn.sm { padding: 6px 10px; font-size: 11px; }
-  }
-
-  @media (max-width: 480px) {
-    .sidebar { padding: 6px 4px; gap: 4px; }
-    .nav-btn { padding: 6px 8px; font-size: 11px; gap: 4px; }
-    .pad { padding: 10px; }
-    .call-preview { min-height: 140px; }
-    .call-controls { flex-direction: column; align-items: stretch; }
-    .call-controls button { width: 100%; }
   }
 </style>
 </head>
 <body>
-  <canvas id="matrixRain" style="position:fixed;inset:0;z-index:-3;opacity:0.30;pointer-events:none;"></canvas>
-  <div class="grid-overlay" style="position:fixed;inset:0;z-index:-1;pointer-events:none;background-image:linear-gradient(rgba(0,246,255,0.055) 1px,transparent 1px),linear-gradient(90deg,rgba(0,246,255,0.055) 1px,transparent 1px);background-size:48px 48px;mask-image:radial-gradient(ellipse at 50% 40%,#000 35%,transparent 78%);-webkit-mask-image:radial-gradient(ellipse at 50% 40%,#000 35%,transparent 78%);"></div>
   <aside class="sidebar">
     <div class="brand">
       <div class="brand-logo">🦆</div>
@@ -1557,6 +1605,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button class="nav-btn" onclick="showTab('terminal', this)">⌨️ Remote Terminal</button>
     <button class="nav-btn" onclick="showTab('protocols', this)">🌐 All-Protocol Hub</button>
     <button class="nav-btn" onclick="showTab('devices', this)">📡 Devices & LAN</button>
+    <button class="nav-btn" onclick="showTab('system', this)">📊 Host System</button>
 
     <div class="sidebar-footer">
       <label>Your Device Name</label>
@@ -1573,9 +1622,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </div>
       <div style="display:flex; gap:8px; align-items:center;">
         <button class="btn secondary sm" id="notifBtn" onclick="enableAlerts()">🔔 Alerts</button>
-        <button class="btn secondary sm" onclick="checkUpdates(true)">↻ Check Update</button>
-        <button class="btn blue sm" id="tunnelBtn" onclick="toggleTunnel()">🌐 Go Online (Internet)</button>
-        <button class="btn secondary sm" onclick="copyShareUrl()">📋 Copy http://duck</button>
+        <button class="btn secondary sm" onclick="openQrModal()">📱 QR Connect</button>
+        <button class="btn secondary sm" onclick="checkUpdates(true)">↻ Update</button>
+        <button class="btn blue sm" id="tunnelBtn" onclick="toggleTunnel()">🌐 Go Online</button>
+        <button class="btn secondary sm" onclick="copyShareUrl()">📋 Copy URL</button>
         <button class="btn sm" onclick="showTab('files', document.querySelectorAll('.nav-btn')[1])">+ Share File</button>
       </div>
     </header>
@@ -1625,13 +1675,17 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <!-- Video grid (overlay on top of chat during call) -->
         <div id="callVideoGrid" style="display:none; position:absolute; inset:0; z-index:40; pointer-events:none; padding:10px; gap:8px; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));"></div>
 
-        <div class="chat-main">
+        <div class="chat-main" id="chatMain">
           <div class="chat-messages" id="chatMessages"></div>
+          <div id="typingBar" style="padding:2px 18px 4px; font-size:11.5px; color:var(--accent); min-height:18px;"></div>
           <div class="chat-input-bar">
             <input type="file" id="chatFileInput" style="display:none" multiple onchange="uploadChatFiles(this.files)">
-            <button class="btn secondary" onclick="document.getElementById('chatFileInput').click()" title="Attach any file">📎</button>
-            <button class="btn blue sm" id="callBtn" onclick="toggleGroupCall()">📞 Group Call</button>
-            <input class="chat-input" id="chatInput" placeholder="Message all devices... (paste images or press Enter)" onkeydown="if(event.key==='Enter')sendChat()">
+            <button class="btn secondary sm" onclick="document.getElementById('chatFileInput').click()" title="Attach any file">📎</button>
+            <button class="btn blue sm" id="callBtn" onclick="toggleGroupCall()">📞 Call</button>
+            <select class="inp" id="chatTarget" style="padding:7px 8px; font-size:12px; max-width:130px;" title="Send to Everyone or Direct Message">
+              <option value="">🌐 Everyone</option>
+            </select>
+            <input class="chat-input" id="chatInput" placeholder="Message devices, drop files, or paste images..." oninput="sendTyping()" onkeydown="if(event.key==='Enter')sendChat()">
             <button class="btn" onclick="sendChat()">Send</button>
           </div>
         </div>
@@ -1650,6 +1704,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
               <button class="btn sm" onclick="syncClipboard()">Sync Now</button>
               <button class="btn secondary sm" onclick="copyClipboard()">Copy</button>
             </div>
+            <div id="clipHistory" style="display:flex; flex-direction:column; gap:4px; margin-top:10px; max-height:130px; overflow-y:auto;"></div>
           </div>
         </aside>
       </div>
@@ -1834,6 +1889,23 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
       </div>
     </section>
 
+    <!-- SYSTEM TELEMETRY TAB -->
+    <section id="tab-system" class="content">
+      <div class="pad">
+        <div style="display:flex; justify-content:space-between; align-items:center;">
+          <h2 style="font-size:16px; font-weight:600;">Host System Telemetry</h2>
+          <button class="btn secondary sm" onclick="loadSysInfo()">↻ Refresh</button>
+        </div>
+        <div class="grid-4" id="sysStatsGrid">
+          <div class="stat-card"><div class="stat-sub">Loading telemetry...</div></div>
+        </div>
+        <div class="card">
+          <h3>Network Interfaces (LAN IPs)</h3>
+          <div id="sysIpsList" style="display:flex; gap:8px; flex-wrap:wrap;"></div>
+        </div>
+      </div>
+    </section>
+
     <!-- FILES TAB -->
   </main>
 
@@ -1851,54 +1923,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   </div>
 
 <script>
-/* ---- Matrix rain (hacker backdrop) ---- */
-(function initMatrixRain() {
-  const cv = document.getElementById('matrixRain');
-  if (!cv) return;
-  const ctx = cv.getContext('2d');
-  const CHARS = 'アイウエオカキクケコサシスセソタチツテトナニヌネノ0123456789ABCDEF$#@%&*<>/\\|=+-';
-  let cols = 0, rows = 0, drops = [], speed = [], cellW = 16, cellH = 18;
-
-  function resize() {
-    cv.width = window.innerWidth;
-    cv.height = window.innerHeight;
-    cols = Math.max(1, Math.floor(cv.width / cellW));
-    rows = Math.max(1, Math.ceil(cv.height / cellH));
-    drops = new Array(cols);
-    speed = new Array(cols);
-    for (let i = 0; i < cols; i++) {
-      drops[i] = Math.random() * -rows;
-      speed[i] = 0.5 + Math.random() * 0.9;
-    }
-  }
-
-  let last = 0;
-  function frame(ts) {
-    if (ts - last > 55) {
-      last = ts;
-      ctx.fillStyle = 'rgba(2,6,23,0.16)';
-      ctx.fillRect(0, 0, cv.width, cv.height);
-      ctx.font = cellH + 'px monospace';
-      for (let i = 0; i < cols; i++) {
-        const ch = CHARS[(Math.random() * CHARS.length) | 0];
-        const x = i * cellW;
-        const y = drops[i] * cellH;
-        // Head of the stream: bright cyan; tail: dim green
-        ctx.fillStyle = 'rgba(0,246,255,0.95)';
-        ctx.fillText(ch, x, y);
-        ctx.fillStyle = 'rgba(5,150,105,' + (0.25 + Math.random() * 0.35).toFixed(2) + ')';
-        ctx.fillText(CHARS[(Math.random() * CHARS.length) | 0], x, y - cellH * 2);
-        drops[i] += speed[i];
-        if (y > cv.height && Math.random() > 0.975) drops[i] = Math.random() * -20;
-      }
-    }
-    requestAnimationFrame(frame);
-  }
-
-  resize();
-  window.addEventListener('resize', resize);
-  requestAnimationFrame(frame);
-})();
+let hostLanUrl = location.origin;
 
 let ws = null;
 let myName = localStorage.getItem('duck_nick') || ('Device-' + Math.floor(100 + Math.random() * 900));
@@ -1919,6 +1944,7 @@ function showTab(name, btn) {
   if (btn) btn.classList.add('active');
   if (name === 'files') loadFiles();
   if (name === 'devices') loadPeers();
+  if (name === 'system') loadSysInfo();
 }
 
 function showProto(name) {
@@ -1947,11 +1973,13 @@ function connectWS() {
         myName = msg.your_name;
         document.getElementById('nickInput').value = myName;
       }
+      hostLanUrl = `http://${msg.ip}${msg.port == 80 ? '' : ':' + msg.port}`;
       document.getElementById('hostPill').textContent = `Host: ${msg.host} (${msg.ip}:${msg.port})`;
-      document.getElementById('hostUrlBox').textContent = `http://duck${msg.port==80?'':':'+msg.port} | http://${msg.ip}${msg.port==80?'':':'+msg.port}`;
+      document.getElementById('hostUrlBox').textContent = `http://duck${msg.port==80?'':':'+msg.port} | ${hostLanUrl}`;
       document.getElementById('chatMessages').innerHTML = '';
       msg.messages.forEach(appendChat);
       document.getElementById('clipBox').value = msg.clipboard || '';
+      if (msg.clip_history) renderClipHistory(msg.clip_history);
       renderPresence(msg.users || []);
       if (msg.tunnel) renderTunnel(msg.tunnel);
       if (msg.update) showUpdateBanner(msg.update);
@@ -1972,7 +2000,12 @@ function connectWS() {
       notifyUser('📡 Device Connected', `${msg.ip} joined Duck Hub`);
     } else if (msg.type === 'clipboard') {
       document.getElementById('clipBox').value = msg.text;
+      if (msg.history) renderClipHistory(msg.history);
       if (msg.sender !== myName) notifyUser('📋 Clipboard Synced', `Updated by ${msg.sender}`);
+    } else if (msg.type === 'reaction') {
+      updateMessageReactions(msg.msg_id, msg.reactions || {});
+    } else if (msg.type === 'typing') {
+      showTypingIndicator(msg.name);
     } else if (msg.type === 'files_updated') {
       loadFiles();
       if (msg.name) notifyUser('📁 New File Shared', `${msg.name} (${fmtSize(msg.size || 0)})`);
@@ -2006,12 +2039,36 @@ function renderPresence(users) {
     const hostTag = (u.hostname && u.hostname !== u.name) ? ` <span style="color:var(--accent);font-size:11px;">[${esc(u.hostname)}]</span>` : '';
     return `<div>🟢 <b>${esc(u.name)}</b>${hostTag} <span style="color:var(--muted);font-size:11px;">(${esc(u.ip)})</span></div>`;
   }).join('') || '<div style="color:var(--muted)">No users</div>';
+  const sel = document.getElementById('chatTarget');
+  if (sel) {
+    const cur = sel.value;
+    sel.innerHTML = '<option value="">🌐 Everyone</option>' +
+      users.filter(u => u.name !== myName).map(u => `<option value="${esc(u.id)}">🔒 ${esc(u.name)}</option>`).join('');
+    sel.value = cur;
+  }
+}
+
+function formatChatText(txt) {
+  let s = esc(txt || '');
+  s = s.replace(/```([\s\S]*?)```/g, (_, code) => `<pre>${code.trim()}</pre>`);
+  s = s.replace(/`([^`\n]+)`/g, '<code>$1</code>');
+  return s;
+}
+
+function renderReactionsHtml(msgId, reactions) {
+  const emojis = ['👍', '❤️', '🔥'];
+  return emojis.map(e => {
+    const users = (reactions && reactions[e]) || [];
+    const active = users.includes(myName) ? ' active' : '';
+    return `<button class="react-btn${active}" onclick="reactMsg('${escAttr(msgId)}','${e}')">${e}${users.length ? ' ' + users.length : ''}</button>`;
+  }).join('');
 }
 
 function appendChat(m) {
   const box = document.getElementById('chatMessages');
   const div = document.createElement('div');
-  div.className = 'msg' + (m.sender === myName ? ' me' : '');
+  div.id = 'msg-' + m.id;
+  div.className = 'msg' + (m.sender === myName ? ' me' : '') + (m.dm ? ' dm' : '');
   let attHtml = '';
   (m.attachments || []).forEach(a => {
     const isImg = /\.(png|jpg|jpeg|gif|webp|bmp)$/i.test(a.name);
@@ -2021,22 +2078,76 @@ function appendChat(m) {
       <a class="btn sm" href="/api/files/${encodeURIComponent(a.name)}?download=1" style="text-decoration:none;">⬇</a>
     </div>`;
   });
-  div.innerHTML = `<div class="msg-head"><span class="msg-sender">${esc(m.sender)}</span><span class="msg-meta">${esc(m.ip || '')} • ${esc(m.ts || '')}</span></div>
-    <div class="msg-body">${esc(m.text || '')}</div>${attHtml}`;
+  const dmTag = m.dm ? `<span class="pill" style="font-size:10px;padding:1px 6px;border-color:var(--accent2);color:var(--accent2);">DM → ${esc(m.to_name || '')}</span>` : '';
+  div.innerHTML = `<div class="msg-head"><span class="msg-sender">${esc(m.sender)}</span>${dmTag}<span class="msg-meta">${esc(m.ip || '')} • ${esc(m.ts || '')}</span></div>
+    <div class="msg-body">${formatChatText(m.text)}</div>${attHtml}
+    <div class="msg-actions" id="react-${esc(m.id)}">${renderReactionsHtml(m.id, m.reactions || {})}<button class="react-btn" onclick="copyText('${escAttr(m.text || '')}');notifyUser('📋 Copied','Message copied')" title="Copy">📋</button></div>`;
   box.appendChild(div);
   box.scrollTop = box.scrollHeight;
+}
+
+function updateMessageReactions(msgId, reactions) {
+  const el = document.getElementById('react-' + msgId);
+  if (!el) return;
+  const copyBtn = el.querySelector('button[title="Copy"]');
+  el.innerHTML = renderReactionsHtml(msgId, reactions);
+  if (copyBtn) el.appendChild(copyBtn);
+}
+
+function reactMsg(msgId, emoji) {
+  if (ws && ws.readyState === 1) ws.send(JSON.stringify({type: 'react', msg_id: msgId, emoji}));
+}
+
+let lastTypingSent = 0;
+let typingHideTimer = null;
+function sendTyping() {
+  const now = Date.now();
+  if (now - lastTypingSent > 1800 && ws && ws.readyState === 1) {
+    lastTypingSent = now;
+    ws.send(JSON.stringify({type: 'typing'}));
+  }
+}
+function showTypingIndicator(name) {
+  const bar = document.getElementById('typingBar');
+  if (!bar) return;
+  bar.textContent = `✍️ ${name} is typing...`;
+  clearTimeout(typingHideTimer);
+  typingHideTimer = setTimeout(() => { bar.textContent = ''; }, 2400);
 }
 
 function sendChat(attachments = []) {
   const inp = document.getElementById('chatInput');
   const text = inp.value.trim();
+  const to = document.getElementById('chatTarget')?.value || '';
   if (!text && !attachments.length) return;
-  ws.send(JSON.stringify({type: 'chat', sender: myName, text, attachments}));
+  ws.send(JSON.stringify({type: 'chat', sender: myName, text, attachments, to}));
   inp.value = '';
 }
 async function clearChat() {
   if (!confirm('Clear all chat messages for everyone?')) return;
   await fetch('/api/chat/clear', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({sender: myName})});
+}
+
+function renderClipHistory(hist) {
+  const box = document.getElementById('clipHistory');
+  if (!box) return;
+  box.innerHTML = (hist || []).map(h => `
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:6px; padding:4px 7px; background:var(--bg); border:1px solid var(--border); border-radius:6px; font-size:11px;">
+      <span style="overflow:hidden; text-overflow:ellipsis; white-space:nowrap; color:var(--text-soft);" title="${esc(h.text)}">${esc(h.text)}</span>
+      <button class="react-btn" onclick="copyText('${escAttr(h.text)}');document.getElementById('clipBox').value='${escAttr(h.text)}';notifyUser('📋 Copied','Restored from history')">📋</button>
+    </div>
+  `).join('');
+}
+
+const chatMainEl = document.getElementById('chatMain');
+if (chatMainEl) {
+  chatMainEl.addEventListener('dragover', e => { e.preventDefault(); chatMainEl.classList.add('drag-over'); });
+  chatMainEl.addEventListener('dragleave', () => chatMainEl.classList.remove('drag-over'));
+  chatMainEl.addEventListener('drop', e => {
+    e.preventDefault();
+    chatMainEl.classList.remove('drag-over');
+    if (e.dataTransfer?.files?.length) uploadChatFiles(e.dataTransfer.files);
+  });
 }
 
 document.getElementById('chatInput').addEventListener('paste', async (e) => {
@@ -2305,19 +2416,63 @@ async function scanLan() {
   const devices = await res.json();
   btn.disabled = false;
   document.getElementById('scanStatus').textContent = `Found ${devices.length} devices.`;
-  document.getElementById('lanTableBody').innerHTML = devices.map(d => `
-    <tr>
+  document.getElementById('lanTableBody').innerHTML = devices.map(d => {
+    const hasMac = d.mac && /^([0-9a-fA-F]{2}[:-]){5}[0-9a-fA-F]{2}$/.test(d.mac);
+    return `<tr>
       <td><b>${esc(d.ip)}</b></td>
       <td>${esc(d.hostname || '-')}</td>
-      <td>${esc(d.mac || '-')}</td>
+      <td style="font-family:var(--mono);font-size:12px;">${esc(d.mac || '-')}</td>
       <td>${d.ports.map(p => `<span class="pill" style="margin-right:4px;">${esc(p)}</span>`).join('') || '<span style="color:var(--muted)">none</span>'}</td>
       <td>
         <button class="btn secondary sm" onclick="quickConnect('${escAttr(d.ip)}','ssh')">SSH</button>
         <button class="btn secondary sm" onclick="quickConnect('${escAttr(d.ip)}','rdp')">RDP</button>
         <button class="btn secondary sm" onclick="quickConnect('${escAttr(d.ip)}','http')">HTTP</button>
+        ${hasMac ? `<button class="btn sm" onclick="wakeMac('${escAttr(d.mac)}')">⚡ Wake</button>` : ''}
       </td>
-    </tr>
-  `).join('');
+    </tr>`;
+  }).join('');
+}
+
+async function wakeMac(mac) {
+  const res = await fetch('/api/wol', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({mac})});
+  const j = await res.json();
+  notifyUser(j.ok ? '⚡ Wake-on-LAN Sent' : '⚠ WoL Failed', j.ok ? `Magic packet sent to ${mac}` : (j.error || 'Error'));
+}
+
+async function loadSysInfo() {
+  try {
+    const s = await (await fetch('/api/sysinfo?t=' + Date.now(), {cache: 'no-store'})).json();
+    const hrs = Math.floor(s.uptime_sec / 3600);
+    const mins = Math.floor((s.uptime_sec % 3600) / 60);
+    document.getElementById('sysStatsGrid').innerHTML = `
+      <div class="stat-card"><div class="stat-sub">Host & Version</div><div class="stat-val">${esc(s.host)}</div><div class="stat-sub">Duck v${esc(s.version)} • ${esc(s.os)} (${esc(s.arch)})</div></div>
+      <div class="stat-card"><div class="stat-sub">RAM Usage</div><div class="stat-val">${s.mem_pct}%</div><div class="stat-sub">${s.mem_used_gb} / ${s.mem_total_gb} GB</div></div>
+      <div class="stat-card"><div class="stat-sub">Disk Usage</div><div class="stat-val">${s.disk_pct}%</div><div class="stat-sub">${s.disk_free_gb} GB free of ${s.disk_total_gb} GB</div></div>
+      <div class="stat-card"><div class="stat-sub">Uptime & Activity</div><div class="stat-val">${hrs}h ${mins}m</div><div class="stat-sub">${s.clients_online} online • ${s.files_count} files</div></div>
+    `;
+    document.getElementById('sysIpsList').innerHTML = (s.lan_ips || []).map(ip => `<span class="pill online" style="font-family:var(--mono);">${esc(ip)}</span>`).join('');
+  } catch (e) {}
+}
+
+function openQrModal() {
+  const tunUrl = document.getElementById('tunnelUrlText')?.textContent;
+  const targetUrl = (tunnelActive && tunUrl && tunUrl.startsWith('http')) ? tunUrl : hostLanUrl;
+  const otp = document.getElementById('tunnelOtpText')?.textContent || '';
+  document.getElementById('modalTitle').textContent = '📱 Connect Mobile / Another Device';
+  const qrSrc = 'https://api.qrserver.com/v1/create-qr-code/?size=220x220&data=' + encodeURIComponent(targetUrl);
+  document.getElementById('modalBody').innerHTML = `
+    <div style="display:flex; flex-direction:column; align-items:center; gap:14px; text-align:center; padding:10px;">
+      <img src="${qrSrc}" alt="QR Code" style="width:220px; height:220px; border-radius:12px; background:#fff; padding:8px;" onerror="this.style.display='none'">
+      <div style="font-size:15px; font-weight:600; color:var(--accent); font-family:var(--mono); word-break:break-all;">${esc(targetUrl)}</div>
+      ${tunnelActive && otp ? `<div class="pill online" style="font-size:14px;">OTP: <b style="letter-spacing:2px;">${esc(otp)}</b></div>` : ''}
+      <div style="display:flex; gap:8px;">
+        <button class="btn sm" onclick="copyText('${escAttr(targetUrl)}');notifyUser('📋 Copied','URL copied')">📋 Copy URL</button>
+        ${tunnelActive && otp ? `<button class="btn secondary sm" onclick="copyText('${escAttr(otp)}');notifyUser('📋 Copied','OTP copied')">📋 Copy OTP</button>` : ''}
+      </div>
+      <div style="font-size:12px; color:var(--muted);">Scan the QR code with your phone camera or open the URL above on any device on your network.</div>
+    </div>
+  `;
+  document.getElementById('previewModal').classList.add('open');
 }
 
 function quickConnect(ip, proto) {
@@ -2440,6 +2595,14 @@ async function applyUpdate() {
   const res = await fetch('/api/update/apply', {method: 'POST'});
   const j = await res.json();
   notifyUser('⬇ Update Status', j.message || j.error || 'Done');
+  if (j.ok && j.restarting) {
+    const poll = setInterval(async () => {
+      try {
+        const r = await fetch('/api/health?t=' + Date.now(), {cache: 'no-store'});
+        if (r.ok) { clearInterval(poll); location.reload(); }
+      } catch (_) {}
+    }, 1000);
+  }
 }
 
 connectWS();
@@ -2895,7 +3058,14 @@ def make_handler(state: DuckState):
             path = parsed.path
 
             if path == "/api/health":
-                self._send_json({"ok": True, "app": APP_NAME, "host": socket.gethostname(), "ip": get_primary_ip(), "port": state.port, "tunnel": state.tunnel.state_dict()})
+                self._send_json({"ok": True, "app": APP_NAME, "version": APP_VERSION, "host": socket.gethostname(), "ip": get_primary_ip(), "port": state.port, "tunnel": state.tunnel.state_dict()})
+                return
+
+            if path == "/api/sysinfo":
+                if not self._is_authorized():
+                    self.send_error(401, "OTP Required")
+                    return
+                self._send_json(get_system_telemetry(state))
                 return
 
             if not self._is_authorized():
@@ -3081,6 +3251,16 @@ def make_handler(state: DuckState):
                 data = self._read_json()
                 state.clear_chat(str(data.get("sender", self.client_address[0]))[:32])
                 self._send_json({"ok": True})
+                return
+
+            if path == "/api/wol":
+                data = self._read_json()
+                try:
+                    send_wol_packet(str(data.get("mac", "")))
+                    state.log(f"Sent Wake-on-LAN packet to {data.get('mac')}")
+                    self._send_json({"ok": True})
+                except Exception as e:
+                    self._send_json({"ok": False, "error": str(e)}, status=400)
                 return
 
             if path == "/api/upload":
@@ -3322,6 +3502,7 @@ def make_handler(state: DuckState):
                 "your_ip": ip,
                 "messages": state.messages[-100:],
                 "clipboard": state.clipboard,
+                "clip_history": state.clip_history,
                 "users": users,
                 "tunnel": state.tunnel.state_dict(),
                 "update": state.latest_update,
@@ -3354,14 +3535,33 @@ def make_handler(state: DuckState):
                             client.hostname = h
                         state.broadcast_presence()
                     elif mtype == "chat":
-                        state.add_message({
+                        to_cid = str(msg.get("to", "")).strip()
+                        chat_obj = {
                             "id": str(uuid.uuid4())[:8],
                             "sender": str(msg.get("sender", client.name))[:32],
                             "ip": ip,
                             "text": str(msg.get("text", "")),
                             "attachments": msg.get("attachments", []),
                             "ts": datetime.now().strftime("%H:%M:%S"),
-                        })
+                            "reactions": {},
+                        }
+                        if to_cid:
+                            chat_obj["dm"] = True
+                            with state.clients_lock:
+                                target_c = state.clients.get(to_cid)
+                                chat_obj["to_name"] = target_c.name if target_c else "Peer"
+                            client.send_json({"type": "chat", "message": chat_obj})
+                            if target_c and not target_c.closed and target_c.id != client.id:
+                                target_c.send_json({"type": "chat", "message": chat_obj})
+                        else:
+                            state.add_message(chat_obj)
+                    elif mtype == "react":
+                        state.toggle_reaction(str(msg.get("msg_id", "")), str(msg.get("emoji", ""))[:8], client.name)
+                    elif mtype == "typing":
+                        with state.clients_lock:
+                            others = [c for c in state.clients.values() if not c.closed and c.id != client.id]
+                        for c in others:
+                            c.send_json({"type": "typing", "name": client.name})
                     elif mtype == "clipboard":
                         state.set_clipboard(str(msg.get("text", "")), str(msg.get("sender", client.name)))
                     elif mtype == "tcp_connect":

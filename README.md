@@ -2,7 +2,7 @@
 
 Single-file, cross-platform (Windows, Linux, Debian, Kali, macOS) intranet & internet communication, unrestricted file sharing, and multi-protocol remote control hub.
 
-**v1.6.0** — download, run, done. No install, no dependencies, no build step.
+**v2.0.0** — download, run, done. No install, no dependencies, no build step.
 
 ## Download
 
@@ -34,12 +34,12 @@ Useful flags:
 ## Features
 
 - **Always-Resolved `duck` Hostname**: Built-in mDNS (`duck.local`), LLMNR (`duck`), NetBIOS (`DUCK`), and 1-click `hosts` + firewall registration.
-- **Real-Time Intranet Chat, Group Calls & Shared Clipboard**: WebSocket chat, paste images, attach any file, clear chat, WebRTC audio/video group calls with screen sharing, live presence, and desktop + toast + sound notifications.
+- **Real-Time Intranet Chat, DMs, Group Calls & Shared Clipboard**: WebSocket chat with direct messages, reactions, typing indicators, code formatting, drag-and-drop file sharing, clipboard history, and WebRTC audio/video group calls with screen sharing.
 - **Unrestricted File Vault**: Streaming upload/download for any file type or size, media range seeking, inline preview, and streaming `.zip` export.
-- **GUI Remote Desktop & Terminal**: Live screen view with mouse/keyboard control and PowerShell/CMD/Bash terminal.
-- **All-Protocol Hub & LAN Scanner**: ARP + port scanner with GUI clients for SSH, FTP, Telnet/TCP, UDP, HTTP/HTTPS, RDP, and SMB.
+- **GUI Remote Desktop, Terminal & Host Telemetry**: Live screen view with mouse/keyboard control, PowerShell/CMD/Bash terminal, and live CPU/RAM/disk/uptime telemetry.
+- **All-Protocol Hub, LAN Scanner & Wake-on-LAN**: ARP + port scanner with multi-protocol hostname resolution (rDNS + NetBIOS + mDNS), 1-click Wake-on-LAN (`⚡ Wake`), QR mobile connect, and GUI clients for SSH, FTP, Telnet/TCP, UDP, HTTP/HTTPS, RDP, and SMB.
 - **1-Click Internet Tunnel + 6-Digit OTP**: Built-in Cloudflare Quick Tunnel (`https://*.trycloudflare.com`) protected by a 6-digit OTP gate.
-- **GitHub Auto-Update**: Checks for new versions and updates in 1 click from the dashboard.
+- **GitHub Auto-Update & Auto-Restart**: Checks for new versions, updates atomically, and restarts automatically in one click.
 
 ## Auto-Update
 
