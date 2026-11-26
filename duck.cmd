@@ -54,7 +54,7 @@ except ImportError:
     HAS_TK = False
 
 APP_NAME = "Duck"
-APP_VERSION = "1.5.0"
+APP_VERSION = "1.6.0"
 
 def _resolve_script_path():
     try:
@@ -1068,6 +1068,20 @@ class DuckState:
             self._save_chat()
         self.broadcast({"type": "chat", "message": msg})
 
+    def clear_chat(self, sender: str):
+        with self.chat_lock:
+            self.messages = [{
+                "id": str(uuid.uuid4())[:8],
+                "sender": "Duck System",
+                "ip": get_primary_ip(),
+                "channel": "general",
+                "text": f"Chat cleared by {sender}.",
+                "ts": datetime.now().strftime("%H:%M:%S"),
+                "attachments": [],
+            }]
+            self._save_chat()
+        self.broadcast({"type": "chat_cleared", "messages": self.messages})
+
     def broadcast(self, obj: dict):
         with self.clients_lock:
             dead = []
@@ -1486,16 +1500,26 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
 
     <!-- CHAT TAB -->
     <section id="tab-chat" class="content active">
+      <!-- Incoming call prompt (shows when a peer starts a call) -->
+      <div id="incomingCallBanner" style="display:none; background:#121d33; border-bottom:1px solid var(--accent); padding:8px 16px; font-size:13px; gap:10px; align-items:center; justify-content:space-between;">
+        <span id="incomingCallText" style="color:var(--accent); font-weight:700;">📞 Incoming group call...</span>
+        <div style="display:flex; gap:6px; align-items:center;">
+          <button class="btn sm" onclick="acceptIncomingCall()">✅ Join Call</button>
+          <button class="btn secondary sm" onclick="dismissIncomingCall()">✕ Dismiss</button>
+        </div>
+      </div>
+
       <!-- Call banner (shows during active call) -->
-      <div id="callBanner" style="display:none; background:linear-gradient(135deg,var(--neon),var(--matrix)); color:#020617; padding:8px 16px; font-weight:700; font-size:13px; display:flex; gap:10px; align-items:center; justify-content:space-between; border-radius:0 0 10px 10px;">
+      <div id="callBanner" style="display:none; background:linear-gradient(135deg,var(--neon),var(--matrix)); color:#020617; padding:8px 16px; font-weight:700; font-size:13px; gap:10px; align-items:center; justify-content:space-between; border-radius:0 0 10px 10px;">
         <span style="display:flex; align-items:center; gap:8px;">
           🔴 GROUP CALL LIVE — <span id="callPeerCount">1</span> connected
           <span id="callTimerBanner" style="font-family:monospace; font-size:11px; margin-left:8px;">00:00</span>
         </span>
         <div style="display:flex; gap:6px; align-items:center;">
-          <button class="btn sm" onclick="toggleCallMic()" style="background:#020617; color:#fff;">🎙️ Mic</button>
-          <button class="btn sm" onclick="toggleCallVideo()" style="background:#020617; color:#fff;">📷 Vid</button>
-          <button class="btn sm" onclick="hangupCall()" style="background:#020617; color:#fff;">📞 Hang Up</button>
+          <button class="btn sm" id="callMicBtn" onclick="toggleCallMic()" style="background:#020617; color:#fff;">🎙️ Mic On</button>
+          <button class="btn sm" id="callVidBtn" onclick="toggleCallVideo()" style="background:#020617; color:#fff;">📷 Cam On</button>
+          <button class="btn sm" id="callScreenBtn" onclick="toggleCallScreen()" style="background:#020617; color:#fff;">🖥️ Share</button>
+          <button class="btn sm" onclick="hangupCall()" style="background:#7f1d1d; color:#fff;">📞 Hang Up</button>
         </div>
       </div>
 
@@ -1515,7 +1539,10 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         </div>
         <aside class="chat-side">
           <div class="card">
-            <h3>Online Devices</h3>
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:8px;">
+              <h3 style="margin:0;">Online Devices</h3>
+              <button class="btn secondary sm" onclick="clearChat()" title="Clear chat history">🗑 Clear Chat</button>
+            </div>
             <div id="presenceList" style="display:flex; flex-direction:column; gap:6px; font-size:13px;"></div>
           </div>
           <div class="card">
@@ -1834,6 +1861,9 @@ function connectWS() {
       if (msg.message.sender !== myName) {
         notifyUser(`💬 ${msg.message.sender}`, msg.message.text || 'Sent an attachment');
       }
+    } else if (msg.type === 'chat_cleared') {
+      document.getElementById('chatMessages').innerHTML = '';
+      (msg.messages || []).forEach(appendChat);
     } else if (msg.type === 'presence') {
       renderPresence(msg.users || []);
     } else if (msg.type === 'device_joined') {
@@ -1848,68 +1878,13 @@ function connectWS() {
       showUpdateBanner(msg.update);
       notifyUser('🆕 Update Available', `Duck v${msg.update.latest} is on GitHub!`);
     } else if (msg.type === 'call_gc_offer') {
-      // Answer a group call offer from any peer
-      if (!callActive && callLocalStream) {
-        callPc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-        callLocalStream.getTracks().forEach(t => callPc.addTrack(t, callLocalStream));
-        callPc.ontrack = (ev) => {
-          const stream = ev.streams[0];
-          if (stream === callLocalStream) return;
-          let found = false;
-          for (const pid in callPeers) {
-            if (callPeers[pid].stream === stream) { found = true; break; }
-          }
-          if (!found) {
-            const pid = 'peer-' + Math.floor(Math.random() * 99999);
-            callPeers[pid] = { pc: callPc, stream, label: 'Peer' };
-            addVideoTile(pid, 'Peer', stream);
-            updateCallBanner();
-          }
-        };
-        callPc.onicecandidate = (ev) => {
-          if (ev.candidate && ws && ws.readyState === 1) {
-            ws.send(JSON.stringify({ type: 'call_gc_ice', candidate: ev.candidate }));
-          }
-        };
-        callPc.onconnectionstatechange = () => {
-          callLog('Group call peer connection: ' + callPc.connectionState);
-        };
-        (async () => {
-          try {
-            await callPc.setRemoteDescription(new RTCSessionDescription({ sdp: msg.sdp, type: msg.sdp_type || 'offer' }));
-            const answer = await callPc.createAnswer();
-            await callPc.setLocalDescription(answer);
-            if (ws && ws.readyState === 1) {
-              ws.send(JSON.stringify({ type: 'call_gc_answer', sdp: answer.sdp, sdp_type: answer.type }));
-            }
-            callLog('Joined group call');
-            if (!callActive) {
-              callActive = true;
-              callBtn.textContent = '📞 End Call';
-              callBtn.className = 'btn blue sm';
-              callBanner.style.display = 'flex';
-              callVideoGrid.style.display = 'grid';
-              startCallTimer();
-            }
-          } catch (e) {
-            callLog('Group call join error: ' + e);
-          }
-        })();
-      }
+      handleIncomingGcOffer(msg);
     } else if (msg.type === 'call_gc_answer') {
-      if (callGc) {
-        callGc.setRemoteDescription(new RTCSessionDescription({ sdp: msg.sdp, type: msg.sdp_type || 'answer' }));
-        callLog('Group call answer received');
-      }
+      handleGcAnswer(msg);
     } else if (msg.type === 'call_gc_ice') {
-      const target = callGc || Object.values(callPeers).find(p => p.pc);
-      if (target && target.pc && msg.candidate) {
-        target.pc.addIceCandidate(new RTCIceCandidate(msg.candidate));
-      }
+      handleGcIce(msg);
     } else if (msg.type === 'call_gc_hangup') {
-      endGroupCall();
-      callLog('Group call ended by peer');
-      notifyUser('📞 Group Call Ended', 'Peer left the call');
+      handleGcHangup(msg);
     } else if (msg.type === 'ssh_out') {
       const out = document.getElementById('sshOut');
       out.textContent += msg.data;
@@ -1953,6 +1928,10 @@ function sendChat(attachments = []) {
   if (!text && !attachments.length) return;
   ws.send(JSON.stringify({type: 'chat', sender: myName, text, attachments}));
   inp.value = '';
+}
+async function clearChat() {
+  if (!confirm('Clear all chat messages for everyone?')) return;
+  await fetch('/api/chat/clear', {method: 'POST', headers: {'Content-Type': 'application/json'}, body: JSON.stringify({sender: myName})});
 }
 
 document.getElementById('chatInput').addEventListener('paste', async (e) => {
@@ -2363,10 +2342,11 @@ setTimeout(() => checkUpdates(false), 3000);
 // Re-check for updates every 5 minutes so running instances pick up new releases.
 setInterval(() => checkUpdates(false), 300000);
 
-/* ============ GROUP CALL (in chat) ============ */
-let callGc = null;          // RTCPeerConnection for group call
+/* ============ GROUP CALL (in chat, multi-peer mesh) ============ */
 let callLocalStream = null;
-let callPeers = {};         // peerId -> { pc, stream, label }
+let callScreenStream = null;
+let callPeers = {};         // peerId -> { pc, stream, label, iceQueue }
+let pendingCallOffer = null;
 let callTimerInterval = null;
 let callActive = false;
 
@@ -2374,6 +2354,7 @@ const callBtn = document.getElementById('callBtn');
 const callBanner = document.getElementById('callBanner');
 const callPeerCount = document.getElementById('callPeerCount');
 const callVideoGrid = document.getElementById('callVideoGrid');
+const RTC_CFG = { iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] };
 
 function callLog(msg) {
   const box = document.getElementById('callLog');
@@ -2391,17 +2372,17 @@ function addVideoTile(peerId, label, stream) {
   const tile = document.createElement('div');
   tile.id = 'vt-' + peerId;
   tile.className = 'call-tile';
-  tile.style.cssText = 'background:#020617; border:1px solid var(--border); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; min-height:150px; aspect-ratio:16/9;';
+  tile.style.cssText = 'position:relative; background:#020617; border:1px solid var(--border); border-radius:10px; overflow:hidden; display:flex; flex-direction:column; min-height:150px; aspect-ratio:16/9;';
   const vid = document.createElement('video');
   vid.id = 'vid-' + peerId;
   vid.autoplay = true;
-  vid.playsinline = true;
+  vid.playsInline = true;
   if (peerId === 'me') vid.muted = true;
   vid.srcObject = stream;
   vid.style.cssText = 'width:100%; height:100%; object-fit:cover; display:block; background:#020617;';
   const lab = document.createElement('div');
   lab.textContent = label;
-  lab.style.cssText = 'position:absolute; bottom:6px; left:6px; font-size:11px; font-weight:700; color:#fff; text-shadow:0 0 6px rgba(0,0,0,0.8); pointer-events:none; z-index:2;';
+  lab.style.cssText = 'position:absolute; bottom:6px; left:6px; font-size:11px; font-weight:700; color:#fff; background:rgba(2,6,23,0.7); padding:2px 7px; border-radius:6px; pointer-events:none; z-index:2;';
   tile.appendChild(vid);
   tile.appendChild(lab);
   callVideoGrid.appendChild(tile);
@@ -2419,7 +2400,9 @@ function startCallTimer() {
   let s = 0;
   const el = document.getElementById('callTimerBanner');
   if (!el) return;
+  el.textContent = '00:00';
   el.style.display = 'inline';
+  if (callTimerInterval) clearInterval(callTimerInterval);
   callTimerInterval = setInterval(() => {
     s++;
     el.textContent = ('0' + Math.floor(s / 60)).slice(-2) + ':' + ('0' + (s % 60)).slice(-2);
@@ -2432,22 +2415,202 @@ function stopCallTimer() {
 }
 
 function updateCallBanner() {
-  const n = Object.keys(callPeers).length + 1; // +1 for self
+  const n = Object.keys(callPeers).length + 1;
   document.getElementById('callPeerCount').textContent = n;
+}
+
+function updateMediaButtons() {
+  const micBtn = document.getElementById('callMicBtn');
+  const vidBtn = document.getElementById('callVidBtn');
+  const scrBtn = document.getElementById('callScreenBtn');
+  const aTrack = callLocalStream?.getAudioTracks()[0];
+  const vTrack = callLocalStream?.getVideoTracks()[0];
+  if (micBtn) {
+    const on = aTrack ? aTrack.enabled : false;
+    micBtn.textContent = on ? '🎙️ Mic On' : '🔇 Mic Off';
+    micBtn.style.background = on ? '#020617' : '#7f1d1d';
+  }
+  if (vidBtn) {
+    const on = vTrack ? vTrack.enabled : false;
+    vidBtn.textContent = on ? '📷 Cam On' : '🚫 Cam Off';
+    vidBtn.style.background = on ? '#020617' : '#7f1d1d';
+  }
+  if (scrBtn) {
+    scrBtn.textContent = callScreenStream ? '🛑 Stop Share' : '🖥️ Share';
+    scrBtn.style.background = callScreenStream ? '#1d4ed8' : '#020617';
+  }
 }
 
 async function requestCallPermissions() {
   try {
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    let stream;
+    try {
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    } catch (_) {
+      // Fallback to audio-only when no camera is attached or camera permission is blocked.
+      stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: false });
+      callLog('No camera found; joined with audio only');
+    }
     callLocalStream = stream;
-    addVideoTile('me', 'You', stream);
-    callLog('Mic + camera access granted');
-    notifyUser('🔐 Permissions', 'Microphone and camera enabled');
+    addVideoTile('me', myName + ' (You)', stream);
+    updateMediaButtons();
+    callLog('Media access granted');
     return stream;
   } catch (e) {
     callLog('Permission denied: ' + e);
-    notifyUser('⚠ Permission Denied', 'Click "Group Call" to allow mic/camera access');
+    notifyUser('⚠ Permission Denied', 'Allow microphone/camera access to join the call');
     throw e;
+  }
+}
+
+function createPeerConnection(peerId, label) {
+  if (callPeers[peerId]?.pc) {
+    try { callPeers[peerId].pc.close(); } catch (_) {}
+  }
+  const pc = new RTCPeerConnection(RTC_CFG);
+  const entry = { pc, stream: null, label: label || 'Peer', iceQueue: [] };
+  callPeers[peerId] = entry;
+  if (callLocalStream) {
+    callLocalStream.getTracks().forEach(t => pc.addTrack(t, callLocalStream));
+  }
+  pc.onicecandidate = (ev) => {
+    if (ev.candidate && ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'call_gc_ice', to: peerId, candidate: ev.candidate }));
+    }
+  };
+  pc.ontrack = (ev) => {
+    const stream = ev.streams[0] || new MediaStream([ev.track]);
+    entry.stream = stream;
+    addVideoTile(peerId, entry.label, stream);
+    updateCallBanner();
+  };
+  pc.onconnectionstatechange = () => {
+    callLog(`${entry.label}: ${pc.connectionState}`);
+    if (pc.connectionState === 'failed' || pc.connectionState === 'closed') {
+      removePeer(peerId);
+    }
+  };
+  return entry;
+}
+
+function removePeer(peerId) {
+  const entry = callPeers[peerId];
+  if (!entry) return;
+  if (entry.pc) { try { entry.pc.close(); } catch (_) {} }
+  delete callPeers[peerId];
+  removeVideoTile(peerId);
+  updateCallBanner();
+}
+
+function enterActiveCallUI() {
+  if (!callActive) {
+    callActive = true;
+    callBtn.textContent = '📞 End Call';
+    callBtn.className = 'btn blue sm';
+    callBanner.style.display = 'flex';
+    callVideoGrid.style.display = 'grid';
+    startCallTimer();
+  }
+  document.getElementById('incomingCallBanner').style.display = 'none';
+  updateCallBanner();
+  updateMediaButtons();
+}
+
+async function handleIncomingGcOffer(msg) {
+  const peerId = msg.from || ('peer-' + Math.floor(Math.random() * 99999));
+  const label = msg.from_name || 'Peer';
+  if (!callActive) {
+    pendingCallOffer = msg;
+    document.getElementById('incomingCallText').textContent = `📞 ${label} started a group call`;
+    document.getElementById('incomingCallBanner').style.display = 'flex';
+    notifyUser('📞 Incoming Group Call', `${label} is calling — click Join Call`);
+    return;
+  }
+  await answerPeerOffer(peerId, label, msg);
+}
+
+async function answerPeerOffer(peerId, label, msg) {
+  const entry = createPeerConnection(peerId, label);
+  try {
+    await entry.pc.setRemoteDescription(new RTCSessionDescription({ sdp: msg.sdp, type: msg.sdp_type || 'offer' }));
+    for (const c of entry.iceQueue) {
+      await entry.pc.addIceCandidate(new RTCIceCandidate(c));
+    }
+    entry.iceQueue = [];
+    const answer = await entry.pc.createAnswer();
+    await entry.pc.setLocalDescription(answer);
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'call_gc_answer', to: peerId, sdp: answer.sdp, sdp_type: answer.type }));
+    }
+    callLog(`Connected to ${label}`);
+  } catch (e) {
+    callLog('Group call join error: ' + e);
+  }
+}
+
+async function acceptIncomingCall() {
+  const msg = pendingCallOffer;
+  pendingCallOffer = null;
+  document.getElementById('incomingCallBanner').style.display = 'none';
+  if (!msg) return;
+  try {
+    await requestCallPermissions();
+  } catch (_) {
+    return;
+  }
+  enterActiveCallUI();
+  await answerPeerOffer(msg.from || 'peer', msg.from_name || 'Peer', msg);
+}
+
+function dismissIncomingCall() {
+  pendingCallOffer = null;
+  document.getElementById('incomingCallBanner').style.display = 'none';
+}
+
+async function handleGcAnswer(msg) {
+  const peerId = msg.from;
+  let entry = callPeers[peerId];
+  if (!entry) {
+    // Match the pending broadcast offer slot if we opened a generic 'broadcast' PC.
+    entry = callPeers['broadcast'];
+    if (entry) {
+      delete callPeers['broadcast'];
+      entry.label = msg.from_name || 'Peer';
+      callPeers[peerId] = entry;
+    }
+  }
+  if (!entry) return;
+  try {
+    await entry.pc.setRemoteDescription(new RTCSessionDescription({ sdp: msg.sdp, type: msg.sdp_type || 'answer' }));
+    for (const c of entry.iceQueue) {
+      await entry.pc.addIceCandidate(new RTCIceCandidate(c));
+    }
+    entry.iceQueue = [];
+    callLog(`Answer received from ${entry.label}`);
+  } catch (e) {
+    callLog('Answer error: ' + e);
+  }
+}
+
+async function handleGcIce(msg) {
+  if (!msg.candidate) return;
+  const entry = callPeers[msg.from] || callPeers['broadcast'];
+  if (!entry || !entry.pc) return;
+  if (entry.pc.remoteDescription) {
+    try { await entry.pc.addIceCandidate(new RTCIceCandidate(msg.candidate)); } catch (_) {}
+  } else {
+    entry.iceQueue.push(msg.candidate);
+  }
+}
+
+function handleGcHangup(msg) {
+  if (msg.from && callPeers[msg.from]) {
+    const label = callPeers[msg.from].label;
+    removePeer(msg.from);
+    callLog(`${label} left the call`);
+  }
+  if (pendingCallOffer && pendingCallOffer.from === msg.from) {
+    dismissIncomingCall();
   }
 }
 
@@ -2458,72 +2621,42 @@ async function toggleGroupCall() {
   }
   try {
     await requestCallPermissions();
-  } catch (e) {
+  } catch (_) {
     return;
   }
-  callActive = true;
-  callBtn.textContent = '📞 End Call';
-  callBtn.className = 'btn blue sm';
-  callBanner.style.display = 'flex';
-  callVideoGrid.style.display = 'grid';
-  startCallTimer();
+  enterActiveCallUI();
   callLog('Group call started');
 
-  callGc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
-  callLocalStream.getTracks().forEach(t => callGc.addTrack(t, callLocalStream));
-
-  callGc.onicecandidate = (ev) => {
-    if (ev.candidate && ws && ws.readyState === 1) {
-      ws.send(JSON.stringify({ type: 'call_gc_ice', candidate: ev.candidate }));
+  const entry = createPeerConnection('broadcast', 'Peer');
+  try {
+    const offer = await entry.pc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
+    await entry.pc.setLocalDescription(offer);
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'call_gc_offer', sdp: offer.sdp, sdp_type: offer.type }));
     }
-  };
-  callGc.ontrack = (ev) => {
-    const stream = ev.streams[0];
-    if (stream === callLocalStream) return;
-    // Assign to a peer slot dynamically
-    let found = false;
-    for (const pid in callPeers) {
-      if (callPeers[pid].stream === stream) { found = true; break; }
-    }
-    if (!found) {
-      // Create placeholder peer for unknown track
-      const pid = 'peer-' + Math.floor(Math.random() * 99999);
-      callPeers[pid] = { pc: null, stream, label: 'Peer' };
-      addVideoTile(pid, 'Peer', stream);
-      updateCallBanner();
-    }
-  };
-  callGc.onconnectionstatechange = () => {
-    callLog('Group call connection: ' + callGc.connectionState);
-  };
-
-  (async () => {
-    try {
-      const offer = await callGc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
-      await callGc.setLocalDescription(offer);
-      if (ws && ws.readyState === 1) {
-        ws.send(JSON.stringify({ type: 'call_gc_offer', sdp: offer.sdp, sdp_type: offer.type }));
-      }
-      callLog('Group call offer broadcast');
-    } catch (e) {
-      callLog('Group call start error: ' + e);
-    }
-  })();
+    callLog('Group call offer broadcast');
+  } catch (e) {
+    callLog('Group call start error: ' + e);
+  }
 }
 
 async function endGroupCall() {
   callActive = false;
+  pendingCallOffer = null;
   callBtn.textContent = '📞 Group Call';
   callBtn.className = 'btn blue sm';
   callBanner.style.display = 'none';
+  document.getElementById('incomingCallBanner').style.display = 'none';
   callVideoGrid.style.display = 'none';
   stopCallTimer();
-  if (callGc) { try { callGc.close(); } catch (e) {} callGc = null; }
-  for (const pid in callPeers) {
-    if (callPeers[pid].pc) { try { callPeers[pid].pc.close(); } catch (e) {} }
-    removeVideoTile(pid);
+  for (const pid of Object.keys(callPeers)) {
+    removePeer(pid);
   }
   callPeers = {};
+  if (callScreenStream) {
+    callScreenStream.getTracks().forEach(t => t.stop());
+    callScreenStream = null;
+  }
   if (callLocalStream) {
     callLocalStream.getTracks().forEach(t => t.stop());
     callLocalStream = null;
@@ -2540,6 +2673,7 @@ function toggleCallMic() {
   const t = callLocalStream.getAudioTracks()[0];
   if (!t) return;
   t.enabled = !t.enabled;
+  updateMediaButtons();
   callLog('Mic ' + (t.enabled ? 'on' : 'off'));
 }
 function toggleCallVideo() {
@@ -2547,7 +2681,36 @@ function toggleCallVideo() {
   const t = callLocalStream.getVideoTracks()[0];
   if (!t) return;
   t.enabled = !t.enabled;
+  updateMediaButtons();
   callLog('Video ' + (t.enabled ? 'on' : 'off'));
+}
+async function toggleCallScreen() {
+  if (!callActive) return;
+  if (callScreenStream) {
+    callScreenStream.getTracks().forEach(t => t.stop());
+    callScreenStream = null;
+    const camTrack = callLocalStream?.getVideoTracks()[0] || null;
+    for (const entry of Object.values(callPeers)) {
+      const sender = entry.pc?.getSenders().find(s => s.track?.kind === 'video');
+      if (sender && camTrack) await sender.replaceTrack(camTrack);
+    }
+    if (callLocalStream) addVideoTile('me', myName + ' (You)', callLocalStream);
+    updateMediaButtons();
+    return;
+  }
+  try {
+    callScreenStream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+    const scrTrack = callScreenStream.getVideoTracks()[0];
+    scrTrack.onended = () => { if (callScreenStream) toggleCallScreen(); };
+    for (const entry of Object.values(callPeers)) {
+      const sender = entry.pc?.getSenders().find(s => s.track?.kind === 'video');
+      if (sender) await sender.replaceTrack(scrTrack);
+    }
+    addVideoTile('me', myName + ' (Screen)', callScreenStream);
+    updateMediaButtons();
+  } catch (e) {
+    callLog('Screen share cancelled: ' + e);
+  }
 }
 
 // Alias for banner button
@@ -2643,10 +2806,6 @@ def make_handler(state: DuckState):
                 self.wfile.write(body)
                 return
 
-            if path == "/api/health":
-                self._send_json({"ok": True, "app": APP_NAME, "host": socket.gethostname(), "ip": get_primary_ip(), "port": state.port})
-                return
-
             if path == "/api/files":
                 items = []
                 for p in sorted(FILES_DIR.iterdir(), key=lambda x: x.stat().st_mtime, reverse=True):
@@ -2671,18 +2830,29 @@ def make_handler(state: DuckState):
                 return
 
             if path == "/api/zip":
-                buf = io.BytesIO()
-                with zipfile.ZipFile(buf, "w", zipfile.ZIP_DEFLATED) as zf:
-                    for p in FILES_DIR.iterdir():
-                        if p.is_file():
-                            zf.write(p, arcname=p.name)
-                data = buf.getvalue()
-                self.send_response(200)
-                self.send_header("Content-Type", "application/zip")
-                self.send_header("Content-Disposition", 'attachment; filename="duck_files.zip"')
-                self.send_header("Content-Length", str(len(data)))
-                self.end_headers()
-                self.wfile.write(data)
+                import tempfile
+                tmp_zip = tempfile.NamedTemporaryFile(delete=False, suffix=".zip")
+                tmp_zip_path = Path(tmp_zip.name)
+                tmp_zip.close()
+                try:
+                    with zipfile.ZipFile(tmp_zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+                        for p in FILES_DIR.iterdir():
+                            if p.is_file():
+                                zf.write(p, arcname=p.name)
+                    zsize = tmp_zip_path.stat().st_size
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/zip")
+                    self.send_header("Content-Disposition", 'attachment; filename="duck_files.zip"')
+                    self.send_header("Content-Length", str(zsize))
+                    self.end_headers()
+                    with open(tmp_zip_path, "rb") as zf_in:
+                        while True:
+                            chunk = zf_in.read(65536)
+                            if not chunk:
+                                break
+                            self.wfile.write(chunk)
+                finally:
+                    tmp_zip_path.unlink(missing_ok=True)
                 return
 
             if path == "/api/screen.png":
@@ -2729,6 +2899,9 @@ def make_handler(state: DuckState):
             self.send_error(404)
 
         def do_DELETE(self):
+            if not self._is_authorized():
+                self.send_error(401, "OTP Required")
+                return
             parsed = urllib.parse.urlparse(self.path)
             if parsed.path.startswith("/api/files/"):
                 fname = os.path.basename(urllib.parse.unquote(parsed.path[len("/api/files/"):]))
@@ -2786,10 +2959,20 @@ def make_handler(state: DuckState):
                     self._send_json({"ok": False, "error": str(e)}, status=500)
                 return
 
+            if path == "/api/chat/clear":
+                data = self._read_json()
+                state.clear_chat(str(data.get("sender", self.client_address[0]))[:32])
+                self._send_json({"ok": True})
+                return
+
             if path == "/api/upload":
                 raw_name = urllib.parse.unquote(self.headers.get("X-Filename", f"upload_{int(time.time())}.bin"))
                 fname = os.path.basename(raw_name) or f"upload_{int(time.time())}.bin"
-                length = int(self.headers.get("Content-Length", 0))
+                try:
+                    length = max(0, int(self.headers.get("Content-Length", 0)))
+                except ValueError:
+                    self._send_json({"ok": False, "error": "Invalid Content-Length"}, status=400)
+                    return
                 dest = FILES_DIR / fname
                 remaining = length
                 with open(dest, "wb") as f:
@@ -2899,17 +3082,20 @@ def make_handler(state: DuckState):
             ctype = ctype or "application/octet-stream"
 
             rng = self.headers.get("Range")
-            start, end = 0, size - 1
+            start, end = 0, max(0, size - 1)
             status = 200
-            if rng and rng.startswith("bytes="):
-                parts = rng[6:].split("-")
-                if parts[0]:
-                    start = int(parts[0])
-                if len(parts) > 1 and parts[1]:
-                    end = min(size - 1, int(parts[1]))
-                status = 206
+            if rng and rng.startswith("bytes=") and size > 0:
+                try:
+                    parts = rng[6:].split("-")
+                    if parts[0]:
+                        start = max(0, min(size - 1, int(parts[0])))
+                    if len(parts) > 1 and parts[1]:
+                        end = max(start, min(size - 1, int(parts[1])))
+                    status = 206
+                except ValueError:
+                    start, end, status = 0, size - 1, 200
 
-            length = max(0, end - start + 1)
+            length = 0 if size == 0 else max(0, end - start + 1)
             self.send_response(status)
             self.send_header("Content-Type", ctype)
             self.send_header("Accept-Ranges", "bytes")
@@ -3070,19 +3256,8 @@ def make_handler(state: DuckState):
                             client.ssh_client.close()
                             client.ssh_client = None
                             client.ssh_chan = None
-                    elif mtype == "call_offer":
-                        self._ws_call_signal(client, msg)
-                    elif mtype == "call_answer":
-                        self._ws_call_signal(client, msg)
-                    elif mtype == "call_ice":
-                        self._ws_call_signal(client, msg)
-                    elif mtype == "call_hangup":
-                        self._ws_call_signal(client, msg)
-                    elif mtype == "call_gc_offer":
-                        self._ws_call_signal(client, msg)
-                    elif mtype == "call_gc_ice":
-                        self._ws_call_signal(client, msg)
-                    elif mtype == "call_gc_hangup":
+                    elif mtype in ("call_offer", "call_answer", "call_ice", "call_hangup",
+                                   "call_gc_offer", "call_gc_answer", "call_gc_ice", "call_gc_hangup"):
                         self._ws_call_signal(client, msg)
             except Exception:
                 pass
