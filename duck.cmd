@@ -54,7 +54,7 @@ except ImportError:
     HAS_TK = False
 
 APP_NAME = "Duck"
-APP_VERSION = "1.3.2"
+APP_VERSION = "1.3.3"
 
 def _resolve_script_path():
     try:
@@ -2243,6 +2243,8 @@ async function applyUpdate() {
 connectWS();
 loadFiles();
 setTimeout(() => checkUpdates(false), 3000);
+// Re-check for updates every 5 minutes so running instances pick up new releases.
+setInterval(() => checkUpdates(false), 300000);
 </script>
 </body>
 </html>
