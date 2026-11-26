@@ -54,7 +54,7 @@ except ImportError:
     HAS_TK = False
 
 APP_NAME = "Duck"
-APP_VERSION = "1.3.0"
+APP_VERSION = "1.3.1"
 GITHUB_REPO = os.environ.get("DUCK_GITHUB_REPO", "Digi-Worm/duck-hub")
 if os.name == "nt":
     DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "DuckHub"
@@ -724,22 +724,37 @@ OTP_GATE_HTML = """<!DOCTYPE html>
 <html lang="en"><head><meta charset="UTF-8"><meta name="viewport" content="width=device-width,initial-scale=1.0">
 <title>Duck Hub — OTP Required</title>
 <style>
-  body{margin:0;height:100vh;display:grid;place-items:center;background:#0b0f19;color:#e6edf7;font-family:'Segoe UI',system-ui,sans-serif;}
-  .box{background:#121826;border:1px solid #253047;border-radius:16px;padding:28px;width:340px;text-align:center;box-shadow:0 20px 50px rgba(0,0,0,0.5);}
-  .logo{font-size:40px;margin-bottom:8px;}
-  h2{margin:0 0 6px;font-size:20px;}
-  p{margin:0 0 18px;font-size:13px;color:#8b9bb4;}
-  input{width:100%;padding:12px;border-radius:10px;border:1px solid #253047;background:#0b0f19;color:#f59e0b;font-size:22px;letter-spacing:6px;text-align:center;font-weight:700;outline:none;box-sizing:border-box;}
-  input:focus{border-color:#f59e0b;}
-  button{margin-top:14px;width:100%;padding:11px;border:none;border-radius:10px;background:#f59e0b;color:#0b0f19;font-weight:700;font-size:14px;cursor:pointer;}
-  .err{color:#ef4444;font-size:12px;margin-top:10px;min-height:16px;}
+  body{margin:0;height:100vh;display:grid;place-items:center;background:#020617;color:#a5b4fc;font-family:'JetBrains Mono','Fira Code',Consolas,monospace;position:relative;overflow:hidden;}
+  body::before{content:'';position:fixed;inset:0;z-index:0;pointer-events:none;
+    background-image:linear-gradient(rgba(0,246,255,0.06) 1px,transparent 1px),linear-gradient(90deg,rgba(0,246,255,0.06) 1px,transparent 1px);
+    background-size:44px 44px;
+    mask-image:radial-gradient(ellipse at 50% 50%,#000 30%,transparent 75%);
+    -webkit-mask-image:radial-gradient(ellipse at 50% 50%,#000 30%,transparent 75%);}
+  body::after{content:'';position:fixed;inset:0;z-index:1;pointer-events:none;
+    background:repeating-linear-gradient(0deg,transparent,transparent 2px,rgba(0,255,136,0.028) 2px,rgba(0,255,136,0.028) 3px);}
+  .box{position:relative;z-index:2;background:rgba(15,23,42,0.92);border:1px solid #334155;border-radius:16px;padding:30px;width:350px;text-align:center;
+    box-shadow:0 0 40px rgba(0,246,255,0.18),0 24px 60px rgba(0,0,0,0.65);backdrop-filter:blur(10px);}
+  .logo{font-size:44px;margin-bottom:10px;filter:drop-shadow(0 0 16px #00f6ff);animation:pulse 2.4s ease-in-out infinite;}
+  @keyframes pulse{0%,100%{filter:drop-shadow(0 0 10px #00f6ff)}50%{filter:drop-shadow(0 0 26px #00f6ff)}}
+  h2{margin:0 0 6px;font-size:20px;font-weight:800;letter-spacing:0.5px;
+    background:linear-gradient(90deg,#06b6d4,#00f6ff);-webkit-background-clip:text;-webkit-text-fill-color:transparent;}
+  p{margin:0 0 18px;font-size:12.5px;color:#64748b;line-height:1.5;}
+  input{width:100%;padding:13px;border-radius:10px;border:1px solid #334155;background:#020617;color:#00f6ff;font-size:24px;letter-spacing:7px;text-align:center;
+    font-weight:700;outline:none;box-sizing:border-box;font-family:inherit;transition:all 0.2s;}
+  input::placeholder{color:#334155;}
+  input:focus{border-color:#00f6ff;box-shadow:0 0 18px rgba(0,246,255,0.45);}
+  button{margin-top:16px;width:100%;padding:12px;border:none;border-radius:10px;background:linear-gradient(135deg,#00f6ff,#06b6d4);color:#020617;
+    font-weight:800;font-size:14px;cursor:pointer;font-family:inherit;letter-spacing:0.5px;transition:all 0.2s;
+    box-shadow:0 4px 18px rgba(6,182,212,0.4);}
+  button:hover{transform:translateY(-2px);box-shadow:0 8px 28px #00f6ff;}
+  .err{color:#ef4444;font-size:12px;margin-top:12px;min-height:16px;font-family:inherit;}
 </style></head><body>
 <div class="box">
   <div class="logo">🦆</div>
-  <h2>Duck Internet Access</h2>
+  <h2>DUCK ACCESS GATE</h2>
   <p>Enter the 6-digit OTP shown on the host dashboard</p>
   <input id="otp" maxlength="6" placeholder="000000" autofocus onkeydown="if(event.key==='Enter')verify()">
-  <button onclick="verify()">Unlock Dashboard</button>
+  <button onclick="verify()">UNLOCK DASHBOARD</button>
   <div class="err" id="err"></div>
 </div>
 <script>
@@ -906,9 +921,15 @@ class DuckState:
 
     def check_github_update(self):
         try:
-            url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/duck.cmd"
-            req = urllib.request.Request(url, headers={"User-Agent": "DuckHub-Updater"})
-            with urllib.request.urlopen(req, timeout=5) as resp:
+            # Cache-bust the CDN: raw.githubusercontent.com can serve a stale copy for
+            # minutes after a push, which made new releases invisible to the updater.
+            url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/duck.cmd?_={int(time.time())}"
+            req = urllib.request.Request(url, headers={
+                "User-Agent": "DuckHub-Updater",
+                "Cache-Control": "no-cache",
+                "Pragma": "no-cache",
+            })
+            with urllib.request.urlopen(req, timeout=8) as resp:
                 head = resp.read(8192).decode("utf-8", errors="ignore")
             m = re.search(r'APP_VERSION\s*=\s*"([^"]+)"', head)
             if not m:
@@ -2164,15 +2185,17 @@ function showUpdateBanner(u) {
   document.getElementById('updateBanner').style.display = 'flex';
   document.getElementById('updateText').textContent = `🆕 Update available: v${u.latest} (current v${u.current}) on GitHub (${u.repo})`;
 }
-
 async function checkUpdates(manual = false) {
-  const res = await fetch('/api/update/check');
+  // Cache-buster: browsers were serving a stale JSON response, hiding new releases.
+  const res = await fetch('/api/update/check?t=' + Date.now(), {cache: 'no-store'});
   const u = await res.json();
   if (u.available) {
     showUpdateBanner(u);
     notifyUser('🆕 Update Available', `v${u.latest} ready to install!`);
+  } else if (u.error) {
+    if (manual) notifyUser('⚠ Update Check Failed', u.error);
   } else if (manual) {
-    notifyUser('✅ Up to Date', `Running Duck v${u.current}`);
+    notifyUser('✅ Up to Date', `Running Duck v${u.current} (latest on GitHub)`);
   }
 }
 
@@ -2213,6 +2236,11 @@ def make_handler(state: DuckState):
             self.send_header("Content-Type", "application/json; charset=utf-8")
             self.send_header("Content-Length", str(len(body)))
             self.send_header("Access-Control-Allow-Origin", "*")
+            # Never let a browser cache API responses: a stale /api/update/check made
+            # the dashboard keep reporting "up to date" long after a new release shipped.
+            self.send_header("Cache-Control", "no-store, no-cache, must-revalidate, max-age=0")
+            self.send_header("Pragma", "no-cache")
+            self.send_header("Expires", "0")
             self.end_headers()
             self.wfile.write(body)
 
