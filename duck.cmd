@@ -1390,6 +1390,47 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
   @keyframes slideIn { from { transform: translateX(30px); opacity: 0; } to { transform: translateX(0); opacity: 1; } }
   @keyframes glitch { 0%,100%{transform:translate(0)} 25%{transform:translate(-2px,2px)} 75%{transform:translate(2px,-2px)} }
   @keyframes pulseGlow { 0%,100%{box-shadow:0 0 12px rgba(0,246,255,0.3)} 50%{box-shadow:0 0 26px rgba(0,246,255,0.75)} }
+
+  /* Call Hub */
+  .call-card { max-width: 560px; }
+  .call-preview { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; margin-bottom: 12px; min-height: 220px; align-items: start; }
+  .video-placeholder { position: relative; background: #020617; border: 1px solid var(--border); border-radius: 10px; overflow: hidden; display: flex; flex-direction: column; min-height: 180px; }
+  .video-placeholder video { width: 100%; height: 100%; object-fit: cover; display: block; background: #020617; }
+  .video-label { position: absolute; bottom: 8px; left: 8px; font-size: 11px; font-weight: 700; color: #fff; text-shadow: 0 0 6px rgba(0,0,0,0.8); pointer-events: none; }
+  .call-controls { display: flex; gap: 10px; justify-content: center; margin-bottom: 12px; flex-wrap: wrap; }
+  .call-incoming { animation: pulseGlow 2s infinite ease-in-out; }
+  #callStatusPill { background: rgba(16,185,129,0.15); color: var(--green); border-color: rgba(16,185,129,0.4); }
+
+  /* Mobile responsiveness */
+  @media (max-width: 768px) {
+    body { flex-direction: column; }
+    .sidebar { width: 100%; height: auto; border-right: none; border-bottom: 1px solid var(--border); padding: 10px 8px; flex-direction: row; overflow-x: auto; gap: 6px; }
+    .sidebar .brand { border: none; margin-bottom: 0; padding: 6px 8px; }
+    .sidebar .brand-title { font-size: 14px; }
+    .sidebar .brand-sub { display: none; }
+    .sidebar .nav-btn { white-space: nowrap; padding: 8px 10px; font-size: 12px; gap: 6px; flex-shrink: 0; }
+    .sidebar .sidebar-footer { display: none; }
+    .main { flex: none; height: calc(100vh - 110px); min-height: 400px; }
+    .topbar { padding: 0 10px; height: 44px; }
+    .topbar-info { gap: 6px; font-size: 11px; }
+    .topbar-info .pill { padding: 3px 8px; font-size: 11px; }
+    .chat-wrap { flex-direction: column; height: 100%; }
+    .chat-side { width: 100%; height: 200px; border-left: none; border-top: 1px solid var(--border); }
+    .chat-main { flex: 1; }
+    .call-preview { grid-template-columns: 1fr; }
+    .grid-2 { grid-template-columns: 1fr; }
+    .call-controls { gap: 6px; }
+    .btn.sm { padding: 6px 10px; font-size: 11px; }
+  }
+
+  @media (max-width: 480px) {
+    .sidebar { padding: 6px 4px; gap: 4px; }
+    .nav-btn { padding: 6px 8px; font-size: 11px; gap: 4px; }
+    .pad { padding: 10px; }
+    .call-preview { min-height: 140px; }
+    .call-controls { flex-direction: column; align-items: stretch; }
+    .call-controls button { width: 100%; }
+  }
 </style>
 </head>
 <body>
@@ -1408,6 +1449,7 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
     <button class="nav-btn" onclick="showTab('desktop', this)">🖥️ Remote Desktop</button>
     <button class="nav-btn" onclick="showTab('terminal', this)">⌨️ Remote Terminal</button>
     <button class="nav-btn" onclick="showTab('protocols', this)">🌐 All-Protocol Hub</button>
+    <button class="nav-btn" onclick="showTab('call', this)">📞 Call Hub</button>
     <button class="nav-btn" onclick="showTab('devices', this)">📡 Devices & LAN</button>
 
     <div class="sidebar-footer">
@@ -1655,6 +1697,64 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         </div>
       </div>
     </section>
+
+    <!-- CALL TAB -->
+    <section id="tab-call" class="content">
+      <div class="pad">
+        <div class="grid-2">
+          <div class="card call-card">
+            <h3>📞 Audio / Video Call</h3>
+            <div style="display:flex; gap:10px; align-items:center; margin-bottom:14px;">
+              <div class="pill" id="callStatusPill" style="padding:6px 12px; border-radius:999px; background:var(--panel2); border:1px solid var(--border); color:var(--muted); font-size:12px;">Idle</div>
+              <div id="callTimer" style="font-family:monospace; font-size:12px; color:var(--neon); display:none;">00:00</div>
+            </div>
+            <div class="call-preview">
+              <div class="video-placeholder" id="localVideoBox">
+                <video id="localVideo" autoplay playsinline muted></video>
+                <div class="video-label">You</div>
+              </div>
+              <div class="video-placeholder" id="remoteVideoBox">
+                <video id="remoteVideo" autoplay playsinline></video>
+                <div class="video-label">Peer</div>
+              </div>
+            </div>
+            <div class="call-controls">
+              <button class="btn sm" id="callMicBtn" onclick="toggleCallMic()">🎙️ Mic: ON</button>
+              <button class="btn sm" id="callVidBtn" onclick="toggleCallVideo()">📷 Video: OFF</button>
+              <button class="btn sm" id="callSpkBtn" onclick="toggleCallSpeaker()">🔊 Speaker: ON</button>
+              <button class="btn danger sm" id="callHangupBtn" onclick="hangupCall()" style="display:none;">📞 Hang Up</button>
+            </div>
+            <input type="hidden" id="callOfferSdp">
+            <div style="margin-top:12px;">
+              <label style="font-size:12px; color:var(--muted); margin-right:8px;">Call peer:</label>
+              <select class="inp" id="callPeerSelect" style="width:200px;"></select>
+              <button class="btn blue sm" id="callStartBtn" onclick="startCall()" style="display:none;">📞 Start Call</button>
+              <button class="btn secondary sm" id="callAnswerBtn" onclick="answerCall()" style="display:none;">✅ Answer</button>
+              <button class="btn secondary sm" id="callDeclineBtn" onclick="declineCall()" style="display:none;">❌ Decline</button>
+            </div>
+            <div id="callLog" style="margin-top:10px; font-family:monospace; font-size:11px; color:var(--muted); height:120px; overflow:auto; background:var(--bg); border:1px solid var(--border); border-radius:8px; padding:8px;"></div>
+          </div>
+          <div class="card">
+            <h3>Call Controls</h3>
+            <p style="font-size:13px; color:var(--muted); margin-bottom:12px;">WebRTC peer-to-peer audio &amp; video signaling relayed through Duck Hub.</p>
+            <div class="form-row">
+              <button class="btn sm" onclick="requestCallPermissions()">🔐 Request Mic &amp; Camera</button>
+              <button class="btn secondary sm" onclick="refreshCallPeers()">🔄 Refresh Peers</button>
+            </div>
+            <div style="margin-top:10px;">
+              <div style="font-size:12px; color:var(--muted); margin-bottom:6px;">Incoming Call:</div>
+              <div class="call-incoming" id="callIncomingBox" style="display:none; border:2px solid var(--neon); border-radius:10px; padding:12px; background:rgba(0,246,255,0.08);">
+                <div style="font-weight:700; color:var(--neon); margin-bottom:4px;">Incoming call from <span id="callIncomingFrom" style="color:#fff;"></span></div>
+                <div style="display:flex; gap:8px; margin-top:8px;">
+                  <button class="btn sm" onclick="answerCall()">Accept</button>
+                  <button class="btn danger sm" onclick="declineCall()">Decline</button>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
   </main>
 
   <!-- TOAST NOTIFICATIONS -->
@@ -1793,6 +1893,24 @@ function connectWS() {
     } else if (msg.type === 'update_available') {
       showUpdateBanner(msg.update);
       notifyUser('🆕 Update Available', `Duck v${msg.update.latest} is on GitHub!`);
+    } else if (msg.type === 'call_offer') {
+      document.getElementById('callOfferSdp').value = msg.sdp || '';
+      showIncomingCall(msg.from, msg.from_name || msg.from);
+      callLog('Incoming call from ' + (msg.from_name || msg.from));
+    } else if (msg.type === 'call_answer') {
+      if (callPc) {
+        callPc.setRemoteDescription(new RTCSessionDescription({ sdp: msg.sdp, type: msg.sdp_type || 'answer' }));
+        callLog('Call accepted by peer');
+      }
+    } else if (msg.type === 'call_ice') {
+      if (callPc && msg.candidate) {
+        callPc.addIceCandidate(new RTCIceCandidate(msg.candidate));
+      }
+    } else if (msg.type === 'call_hangup') {
+      endCallUI();
+      hideIncomingCall();
+      callLog('Peer ended the call');
+      notifyUser('📞 Call Ended', msg.from_name || 'Peer hung up');
     } else if (msg.type === 'ssh_out') {
       const out = document.getElementById('sshOut');
       out.textContent += msg.data;
@@ -2238,6 +2356,260 @@ async function applyUpdate() {
   const res = await fetch('/api/update/apply', {method: 'POST'});
   const j = await res.json();
   notifyUser('⬇ Update Status', j.message || j.error || 'Done');
+}
+
+function refreshCallPeers() {
+  const sel = document.getElementById('callPeerSelect');
+  const cur = sel.value;
+  sel.innerHTML = '<option value="">Select a device...</option>';
+  const users = (document.getElementById('presenceList') || {}).querySelectorAll
+    ? Array.from(document.getElementById('presenceList').querySelectorAll('b')).map(b => b.textContent)
+    : [];
+  // Rebuild from last known presence via WS init — simplest: fetch peers from presence elements
+  document.querySelectorAll('#presenceList > div').forEach(d => {
+    const name = d.querySelector('b');
+    const ip = d.querySelector('span');
+    if (!name) return;
+    const opt = document.createElement('option');
+    opt.value = name.textContent;
+    opt.textContent = name.textContent + (ip ? ' (' + ip.textContent.replace(/[()]/g,'') + ')' : '');
+    sel.appendChild(opt);
+  });
+  if (cur) sel.value = cur;
+  document.getElementById('callStartBtn').style.display = sel.options.length > 1 ? 'inline-block' : 'none';
+}
+
+let callPc = null;
+let callLocalStream = null;
+let callRemoteStream = null;
+let callTimerInterval = null;
+let callStarted = false;
+let callIncomingId = null;
+
+function callLog(msg) {
+  const box = document.getElementById('callLog');
+  if (!box) return;
+  const d = document.createElement('div');
+  d.textContent = new Date().toLocaleTimeString() + '  ' + msg;
+  box.appendChild(d);
+  box.scrollTop = box.scrollHeight;
+}
+
+function setCallStatus(txt, cls) {
+  const p = document.getElementById('callStatusPill');
+  if (!p) return;
+  p.textContent = txt;
+  p.className = 'pill ' + (cls || '');
+  p.style.background = cls === 'active' ? 'rgba(0,246,255,0.15)' : 'var(--panel2)';
+  p.style.color = cls === 'active' ? 'var(--neon)' : 'var(--muted)';
+  p.style.borderColor = cls === 'active' ? 'rgba(0,246,255,0.5)' : 'var(--border)';
+}
+
+function startCallTimer() {
+  let s = 0;
+  const el = document.getElementById('callTimer');
+  el.style.display = 'inline-block';
+  callTimerInterval = setInterval(() => {
+    s++;
+    el.textContent = ('0' + Math.floor(s / 60)).slice(-2) + ':' + ('0' + (s % 60)).slice(-2);
+  }, 1000);
+}
+function stopCallTimer() {
+  if (callTimerInterval) { clearInterval(callTimerInterval); callTimerInterval = null; }
+  const el = document.getElementById('callTimer');
+  if (el) el.style.display = 'none';
+}
+
+async function requestCallPermissions() {
+  try {
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: true, video: true });
+    callLocalStream = stream;
+    const lv = document.getElementById('localVideo');
+    if (lv) lv.srcObject = stream;
+    callLog('Mic + camera access granted');
+    notifyUser('🔐 Permissions', 'Microphone and camera enabled');
+    refreshCallPeers();
+  } catch (e) {
+    callLog('Permission denied: ' + e);
+    notifyUser('⚠ Permission Denied', 'Allow mic/camera to start calls');
+  }
+}
+
+async function toggleCallMic() {
+  if (!callLocalStream) return;
+  const track = callLocalStream.getAudioTracks()[0];
+  if (!track) return;
+  track.enabled = !track.enabled;
+  const btn = document.getElementById('callMicBtn');
+  if (btn) btn.textContent = track.enabled ? '🎙️ Mic: ON' : '🎙️ Mic: OFF';
+  callLog('Microphone ' + (track.enabled ? 'unmuted' : 'muted'));
+}
+async function toggleCallVideo() {
+  if (!callLocalStream) return;
+  const track = callLocalStream.getVideoTracks()[0];
+  if (!track) return;
+  track.enabled = !track.enabled;
+  const btn = document.getElementById('callVidBtn');
+  if (btn) btn.textContent = track.enabled ? '📷 Video: ON' : '📷 Video: OFF';
+  callLog('Video ' + (track.enabled ? 'enabled' : 'disabled'));
+}
+async function toggleCallSpeaker() {
+  const rv = document.getElementById('remoteVideo');
+  if (!rv) return;
+  rv.muted = !rv.muted;
+  const btn = document.getElementById('callSpkBtn');
+  if (btn) btn.textContent = rv.muted ? '🔊 Speaker: OFF' : '🔊 Speaker: ON';
+}
+
+async function startCall() {
+  const sel = document.getElementById('callPeerSelect');
+  const to = sel.value;
+  if (!to) return;
+  if (!callLocalStream) {
+    await requestCallPermissions();
+    if (!callLocalStream) return;
+  }
+  callPc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  callLocalStream.getTracks().forEach(t => callPc.addTrack(t, callLocalStream));
+  callPc.ontrack = (ev) => {
+    const rv = document.getElementById('remoteVideo');
+    if (rv) rv.srcObject = ev.streams[0];
+    callLog('Remote track received');
+  };
+  callPc.onicecandidate = (ev) => {
+    if (ev.candidate && ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'call_ice', to, candidate: ev.candidate }));
+    }
+  };
+  callPc.onconnectionstatechange = () => {
+    callLog('Connection state: ' + callPc.connectionState);
+    if (callPc.connectionState === 'connected') {
+      setCallStatus('Active', 'active');
+      document.getElementById('callHangupBtn').style.display = 'inline-block';
+      document.getElementById('callStartBtn').style.display = 'none';
+      document.getElementById('callAnswerBtn').style.display = 'none';
+      document.getElementById('callDeclineBtn').style.display = 'none';
+      startCallTimer();
+      callStarted = true;
+    } else if (callPc.connectionState === 'failed' || callPc.connectionState === 'closed' || callPc.connectionState === 'disconnected') {
+      endCallUI();
+    }
+  };
+  try {
+    const offer = await callPc.createOffer({ offerToReceiveAudio: true, offerToReceiveVideo: true });
+    await callPc.setLocalDescription(offer);
+    if (ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'call_offer', to, sdp: offer.sdp, sdp_type: offer.type }));
+    }
+    callLog('Call offer sent to ' + to);
+    setCallStatus('Calling…');
+    document.getElementById('callHangupBtn').style.display = 'inline-block';
+    document.getElementById('callStartBtn').style.display = 'none';
+    callStarted = true;
+  } catch (e) {
+    callLog('Call error: ' + e);
+    notifyUser('❌ Call Failed', e.message);
+  }
+}
+
+function answerCall() {
+  if (!callIncomingId) return;
+  if (!callLocalStream) {
+    callLog('Requesting mic/camera before answering...');
+    // We'll proceed; browser may prompt
+  }
+  callPc = new RTCPeerConnection({ iceServers: [{ urls: 'stun:stun.l.google.com:19302' }] });
+  if (callLocalStream) callLocalStream.getTracks().forEach(t => callPc.addTrack(t, callLocalStream));
+  callPc.ontrack = (ev) => {
+    const rv = document.getElementById('remoteVideo');
+    if (rv) rv.srcObject = ev.streams[0];
+  };
+  callPc.onicecandidate = (ev) => {
+    if (ev.candidate && ws && ws.readyState === 1) {
+      ws.send(JSON.stringify({ type: 'call_ice', to: callIncomingId, candidate: ev.candidate }));
+    }
+  };
+  callPc.onconnectionstatechange = () => {
+    if (callPc.connectionState === 'connected') {
+      setCallStatus('Active', 'active');
+      document.getElementById('callHangupBtn').style.display = 'inline-block';
+      document.getElementById('callAnswerBtn').style.display = 'none';
+      document.getElementById('callDeclineBtn').style.display = 'none';
+      startCallTimer();
+    }
+  };
+  (async () => {
+    try {
+      const offer = new RTCSessionDescription({ sdp: document.getElementById('callOfferSdp').value || '', type: 'offer' });
+      await callPc.setRemoteDescription(offer);
+      const answer = await callPc.createAnswer();
+      await callPc.setLocalDescription(answer);
+      if (ws && ws.readyState === 1) {
+        ws.send(JSON.stringify({ type: 'call_answer', to: callIncomingId, sdp: answer.sdp, sdp_type: answer.type }));
+      }
+      callLog('Call answered');
+    } catch (e) {
+      callLog('Answer error: ' + e);
+      declineCall();
+    }
+  })();
+  hideIncomingCall();
+}
+
+function declineCall() {
+  hideIncomingCall();
+  if (callIncomingId && ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'call_hangup', to: callIncomingId }));
+  }
+  callIncomingId = null;
+  document.getElementById('callAnswerBtn').style.display = 'none';
+  document.getElementById('callDeclineBtn').style.display = 'none';
+}
+
+function hangupCall() {
+  if (callPc) {
+    try { callPc.close(); } catch (e) {}
+    callPc = null;
+  }
+  if (callLocalStream) {
+    callLocalStream.getTracks().forEach(t => t.stop());
+    callLocalStream = null;
+    const lv = document.getElementById('localVideo');
+    if (lv) lv.srcObject = null;
+  }
+  const rv = document.getElementById('remoteVideo');
+  if (rv) rv.srcObject = null;
+  if (callIncomingId && ws && ws.readyState === 1) {
+    ws.send(JSON.stringify({ type: 'call_hangup', to: callIncomingId }));
+  }
+  endCallUI();
+}
+
+function endCallUI() {
+  stopCallTimer();
+  setCallStatus('Idle');
+  document.getElementById('callHangupBtn').style.display = 'none';
+  document.getElementById('callStartBtn').style.display = 'inline-block';
+  document.getElementById('callAnswerBtn').style.display = 'none';
+  document.getElementById('callDeclineBtn').style.display = 'none';
+  callIncomingId = null;
+  callStarted = false;
+  callLog('Call ended');
+}
+
+function hideIncomingCall() {
+  const box = document.getElementById('callIncomingBox');
+  if (box) box.style.display = 'none';
+}
+
+function showIncomingCall(fromId, fromName) {
+  callIncomingId = fromId;
+  document.getElementById('callIncomingFrom').textContent = fromName;
+  const box = document.getElementById('callIncomingBox');
+  if (box) box.style.display = 'block';
+  document.getElementById('callAnswerBtn').style.display = 'inline-block';
+  document.getElementById('callDeclineBtn').style.display = 'inline-block';
+  notifyUser('📞 Incoming Call', 'From ' + fromName);
 }
 
 connectWS();
@@ -2758,6 +3130,14 @@ def make_handler(state: DuckState):
                             client.ssh_client.close()
                             client.ssh_client = None
                             client.ssh_chan = None
+                    elif mtype == "call_offer":
+                        self._ws_call_signal(client, msg)
+                    elif mtype == "call_answer":
+                        self._ws_call_signal(client, msg)
+                    elif mtype == "call_ice":
+                        self._ws_call_signal(client, msg)
+                    elif mtype == "call_hangup":
+                        self._ws_call_signal(client, msg)
             except Exception:
                 pass
             finally:
@@ -2826,8 +3206,32 @@ def make_handler(state: DuckState):
             except Exception as e:
                 client.send_json({"type": "ssh_out", "data": f"SSH Error: {e}\n"})
 
-    return DuckHandler
+        def _ws_call_signal(self, client: WebSocketClient, msg: dict):
+            """Relay WebRTC call signaling (offer/answer/ICE/hangup) to all other peers."""
+            relay = {
+                "type": msg.get("type", "call_signal"),
+                "from": client.id,
+                "from_name": client.name,
+                "to": msg.get("to", ""),
+                "sdp": msg.get("sdp", ""),
+                "sdp_type": msg.get("sdp_type", ""),
+                "candidate": msg.get("candidate", None),
+                "ts": datetime.now().strftime("%H:%M:%S"),
+            }
+            with state.clients_lock:
+                targets = [c for c in state.clients.values() if not c.closed]
+            for c in targets:
+                if c.id == client.id:
+                    continue
+                if relay["to"] and c.id != relay["to"]:
+                    continue
+                try:
+                    c.send_json(relay)
+                except Exception:
+                    pass
+            state.log(f"Call signal {relay['type']} from {client.name} -> {relay['to'] or 'broadcast'}")
 
+    return DuckHandler
 
 # ---------------------------------------------------------------------------
 # Server Lifecycle & Tkinter GUI Control Center
