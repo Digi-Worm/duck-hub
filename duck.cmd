@@ -653,6 +653,20 @@ class IntranetDiscovery:
 WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
+def resolve_hostname(ip):
+    """Best-effort reverse DNS / NetBIOS name for a LAN IP; '' on failure."""
+    try:
+        return socket.gethostbyaddr(ip)[0].split(".")[0]
+    except Exception:
+        pass
+    try:
+        # mDNS-style: many Android/iOS devices answer <name>.local only via mDNS,
+        # but a plain getaddrinfo on the IP's reverse form still works on some LANs.
+        return ""
+    except Exception:
+        return ""
+
+
 class WebSocketClient:
     def __init__(self, sock, addr, client_id, name, ip):
         self.sock = sock
@@ -1067,7 +1081,9 @@ class DuckState:
 
     def broadcast_presence(self):
         with self.clients_lock:
-            users = [{"id": c.id, "name": c.name, "ip": c.ip} for c in self.clients.values() if not c.closed]
+            users = [{"id": c.id, "name": c.name, "ip": c.ip,
+                      "hostname": getattr(c, "hostname", "") or c.name,
+                      "self": False} for c in self.clients.values() if not c.closed]
         self.broadcast({"type": "presence", "users": users})
 
 
@@ -2665,7 +2681,13 @@ def make_handler(state: DuckState):
 
             cid = str(uuid.uuid4())[:8]
             ip = self.client_address[0]
-            client = WebSocketClient(self.connection, self.client_address, cid, f"Device-{cid[:4]}", ip)
+            # Real device name: client-reported hostname wins, else reverse DNS.
+            host = ""
+            try:
+                host = resolve_hostname(ip)
+            except Exception:
+                host = ""
+            client = WebSocketClient(self.connection, self.client_address, cid, host or f"Device-{cid[:4]}", ip)
             with state.clients_lock:
                 state.clients[cid] = client
                 users = [{"id": c.id, "name": c.name, "ip": c.ip} for c in state.clients.values() if not c.closed]
@@ -2682,8 +2704,8 @@ def make_handler(state: DuckState):
                 "update": state.latest_update,
             })
             state.broadcast_presence()
-            state.broadcast({"type": "device_joined", "ip": ip})
-            state.log(f"Device connected: {ip}")
+            state.broadcast({"type": "device_joined", "ip": ip, "name": client.name})
+            state.log(f"Device connected: {client.name} ({ip})")
 
             try:
                 while not client.closed:
@@ -2700,6 +2722,9 @@ def make_handler(state: DuckState):
 
                     if mtype == "hello":
                         client.name = str(msg.get("name", client.name))[:32]
+                        host = str(msg.get("hostname", ""))[:48]
+                        if host:
+                            client.hostname = host
                         state.broadcast_presence()
                     elif mtype == "chat":
                         state.add_message({
