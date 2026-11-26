@@ -54,7 +54,7 @@ except ImportError:
     HAS_TK = False
 
 APP_NAME = "Duck"
-APP_VERSION = "1.6.0"
+APP_VERSION = "1.6.1"
 
 def _resolve_script_path():
     try:
@@ -653,18 +653,116 @@ class IntranetDiscovery:
 WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11"
 
 
-def resolve_hostname(ip):
-    """Best-effort reverse DNS / NetBIOS name for a LAN IP; '' on failure."""
+_HOSTNAME_CACHE = {}
+_HOSTNAME_CACHE_LOCK = threading.Lock()
+
+
+def _nbns_query_name(ip: str, timeout: float = 0.35) -> str:
+    """Query NetBIOS Node Status (UDP 137) for the device's real Windows/Samba name."""
+    txid = secrets.randbits(16)
+    pkt = struct.pack("!HHHHHH", txid, 0x0000, 1, 0, 0, 0)
+    pkt += _encode_dns_name("CKAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA")
+    pkt += struct.pack("!HH", 0x0021, 0x0001)  # NBSTAT, IN
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        return socket.gethostbyaddr(ip)[0].split(".")[0]
+        s.settimeout(timeout)
+        s.sendto(pkt, (ip, 137))
+        data, _ = s.recvfrom(1024)
+        # Skip 12-byte header + encoded name + type/class/ttl/rdlen
+        idx = 12
+        while idx < len(data) and data[idx] != 0:
+            idx += 1 + data[idx]
+        idx += 1 + 10  # null + type(2) + class(2) + ttl(4) + rdlen(2)
+        if idx >= len(data):
+            return ""
+        num_names = data[idx]
+        idx += 1
+        for _ in range(num_names):
+            if idx + 18 > len(data):
+                break
+            raw_name = data[idx:idx + 15].decode("ascii", errors="ignore").strip()
+            name_type = data[idx + 15]
+            flags = struct.unpack("!H", data[idx + 16:idx + 18])[0]
+            idx += 18
+            is_group = bool(flags & 0x8000)
+            if name_type == 0x00 and not is_group and raw_name and not raw_name.startswith("__"):
+                return raw_name
     except Exception:
         pass
+    finally:
+        s.close()
+    return ""
+
+
+def _mdns_ptr_query(ip: str, timeout: float = 0.35) -> str:
+    """Query mDNS (224.0.0.251:5353) reverse PTR for .local hostnames (macOS/iOS/Android/Linux)."""
+    parts = ip.split(".")
+    if len(parts) != 4:
+        return ""
+    rev_name = ".".join(reversed(parts)) + ".in-addr.arpa"
+    txid = secrets.randbits(16)
+    pkt = struct.pack("!HHHHHH", txid, 0x0000, 1, 0, 0, 0) + _encode_dns_name(rev_name) + struct.pack("!HH", 12, 1)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
-        # mDNS-style: many Android/iOS devices answer <name>.local only via mDNS,
-        # but a plain getaddrinfo on the IP's reverse form still works on some LANs.
-        return ""
+        s.settimeout(timeout)
+        s.sendto(pkt, ("224.0.0.251", 5353))
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            data, _ = s.recvfrom(1024)
+            if len(data) < 12:
+                continue
+            ancount = struct.unpack("!H", data[6:8])[0]
+            if ancount == 0:
+                continue
+            _, off = _parse_dns_name(data, 12)
+            off += 4  # qtype + qclass
+            for _ in range(ancount):
+                if off >= len(data):
+                    break
+                _, off = _parse_dns_name(data, off)
+                if off + 10 > len(data):
+                    break
+                rtype, _, _, rdlen = struct.unpack("!HHIH", data[off:off + 10])
+                off += 10
+                if rtype == 12 and off + rdlen <= len(data):  # PTR
+                    target, _ = _parse_dns_name(data, off)
+                    if target:
+                        return target.split(".")[0]
+                off += rdlen
     except Exception:
+        pass
+    finally:
+        s.close()
+    return ""
+
+
+def resolve_hostname(ip):
+    """Resolve real hostname for a LAN IP via rDNS, NetBIOS (UDP 137), and mDNS PTR."""
+    if not ip:
         return ""
+    if ip in ("127.0.0.1", "::1") or ip == get_primary_ip():
+        return socket.gethostname()
+    now = time.time()
+    with _HOSTNAME_CACHE_LOCK:
+        cached = _HOSTNAME_CACHE.get(ip)
+        if cached and now - cached[1] < 60:
+            return cached[0]
+
+    name = ""
+    try:
+        rdns = socket.gethostbyaddr(ip)[0].split(".")[0]
+        if rdns and rdns != ip:
+            name = rdns
+    except Exception:
+        pass
+    if not name:
+        name = _nbns_query_name(ip)
+    if not name:
+        name = _mdns_ptr_query(ip)
+
+    with _HOSTNAME_CACHE_LOCK:
+        _HOSTNAME_CACHE[ip] = (name, now)
+    return name
 
 
 class WebSocketClient:
@@ -1729,8 +1827,8 @@ DASHBOARD_HTML = r"""<!DOCTYPE html>
         <div class="card">
           <h3>LAN Devices & Open Protocols</h3>
           <table>
-            <thead><tr><th>IP Address</th><th>MAC / Type</th><th>Open Ports / Protocols</th><th>Quick Connect</th></tr></thead>
-            <tbody id="lanTableBody"><tr><td colspan="4" style="color:var(--muted);">Click "Scan Intranet Devices" to discover devices on your network.</td></tr></tbody>
+            <thead><tr><th>IP Address</th><th>Hostname</th><th>MAC / Type</th><th>Open Ports / Protocols</th><th>Quick Connect</th></tr></thead>
+            <tbody id="lanTableBody"><tr><td colspan="5" style="color:var(--muted);">Click "Scan Intranet Devices" to discover devices on your network.</td></tr></tbody>
           </table>
         </div>
       </div>
@@ -1845,6 +1943,10 @@ function connectWS() {
   ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
     if (msg.type === 'init') {
+      if (!localStorage.getItem('duck_nick') && msg.your_name) {
+        myName = msg.your_name;
+        document.getElementById('nickInput').value = myName;
+      }
       document.getElementById('hostPill').textContent = `Host: ${msg.host} (${msg.ip}:${msg.port})`;
       document.getElementById('hostUrlBox').textContent = `http://duck${msg.port==80?'':':'+msg.port} | http://${msg.ip}${msg.port==80?'':':'+msg.port}`;
       document.getElementById('chatMessages').innerHTML = '';
@@ -1900,7 +2002,10 @@ function connectWS() {
 function renderPresence(users) {
   document.getElementById('onlineCount').textContent = `${users.length} online`;
   const list = document.getElementById('presenceList');
-  list.innerHTML = users.map(u => `<div>🟢 <b>${esc(u.name)}</b> <span style="color:var(--muted);font-size:11px;">(${esc(u.ip)})</span></div>`).join('') || '<div style="color:var(--muted)">No users</div>';
+  list.innerHTML = users.map(u => {
+    const hostTag = (u.hostname && u.hostname !== u.name) ? ` <span style="color:var(--accent);font-size:11px;">[${esc(u.hostname)}]</span>` : '';
+    return `<div>🟢 <b>${esc(u.name)}</b>${hostTag} <span style="color:var(--muted);font-size:11px;">(${esc(u.ip)})</span></div>`;
+  }).join('') || '<div style="color:var(--muted)">No users</div>';
 }
 
 function appendChat(m) {
@@ -2203,6 +2308,7 @@ async function scanLan() {
   document.getElementById('lanTableBody').innerHTML = devices.map(d => `
     <tr>
       <td><b>${esc(d.ip)}</b></td>
+      <td>${esc(d.hostname || '-')}</td>
       <td>${esc(d.mac || '-')}</td>
       <td>${d.ports.map(p => `<span class="pill" style="margin-right:4px;">${esc(p)}</span>`).join('') || '<span style="color:var(--muted)">none</span>'}</td>
       <td>
@@ -2767,6 +2873,18 @@ def make_handler(state: DuckState):
                 return True
             return any(s in host for s in (".trycloudflare.com", ".lhr.life", ".ngrok"))
 
+        def _get_client_ip(self):
+            cf_ip = (self.headers.get("Cf-Connecting-Ip") or "").strip()
+            if cf_ip:
+                return cf_ip
+            xff = (self.headers.get("X-Forwarded-For") or "").split(",")[0].strip()
+            if xff:
+                return xff
+            raw_ip = self.client_address[0]
+            if raw_ip in ("127.0.0.1", "::1"):
+                return get_primary_ip()
+            return raw_ip
+
         def _is_authorized(self):
             if not self._is_tunnel_request():
                 return True
@@ -3160,8 +3278,10 @@ def make_handler(state: DuckState):
                         s.close()
                     except Exception:
                         pass
+                hname = resolve_hostname(ip)
                 with lock:
                     devices[ip]["ports"] = found
+                    devices[ip]["hostname"] = hname
 
             threads = [threading.Thread(target=check_ip, args=(ip,)) for ip in list(devices.keys())[:40]]
             for t in threads:
@@ -3180,23 +3300,26 @@ def make_handler(state: DuckState):
             self.end_headers()
 
             cid = str(uuid.uuid4())[:8]
-            ip = self.client_address[0]
-            # Real device name: client-reported hostname wins, else reverse DNS.
+            ip = self._get_client_ip()
+            # Real device name: reverse DNS / NetBIOS / mDNS PTR.
             host = ""
             try:
                 host = resolve_hostname(ip)
             except Exception:
                 host = ""
             client = WebSocketClient(self.connection, self.client_address, cid, host or f"Device-{cid[:4]}", ip)
+            client.hostname = host
             with state.clients_lock:
                 state.clients[cid] = client
-                users = [{"id": c.id, "name": c.name, "ip": c.ip} for c in state.clients.values() if not c.closed]
+                users = [{"id": c.id, "name": c.name, "ip": c.ip, "hostname": getattr(c, "hostname", "") or c.name} for c in state.clients.values() if not c.closed]
 
             client.send_json({
                 "type": "init",
                 "host": socket.gethostname(),
                 "ip": get_primary_ip(),
                 "port": state.port,
+                "your_name": client.name,
+                "your_ip": ip,
                 "messages": state.messages[-100:],
                 "clipboard": state.clipboard,
                 "users": users,
@@ -3221,10 +3344,14 @@ def make_handler(state: DuckState):
                     mtype = msg.get("type")
 
                     if mtype == "hello":
-                        client.name = str(msg.get("name", client.name))[:32]
-                        host = str(msg.get("hostname", ""))[:48]
-                        if host:
-                            client.hostname = host
+                        req_name = str(msg.get("name", "")).strip()[:32]
+                        # Keep the server-resolved real hostname when the browser only sends
+                        # its auto-generated Device-XXX placeholder.
+                        if req_name and not (req_name.startswith("Device-") and getattr(client, "hostname", "")):
+                            client.name = req_name
+                        h = str(msg.get("hostname", ""))[:48]
+                        if h:
+                            client.hostname = h
                         state.broadcast_presence()
                     elif mtype == "chat":
                         state.add_message({
