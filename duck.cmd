@@ -54,7 +54,20 @@ except ImportError:
     HAS_TK = False
 
 APP_NAME = "Duck"
-APP_VERSION = "1.3.1"
+APP_VERSION = "1.3.2"
+
+def _resolve_script_path():
+    try:
+        return Path(os.path.abspath(__file__))
+    except NameError:
+        # The polyglot launcher runs this file as `python -c "exec(...)" <duck.cmd>`,
+        # where __file__ is undefined; the real path then lands in sys.argv[1..].
+        for a in sys.argv:
+            if a and a.lower().endswith("duck.cmd"):
+                return Path(os.path.abspath(a))
+        return Path("duck.cmd").resolve()
+
+SCRIPT_PATH = _resolve_script_path()
 GITHUB_REPO = os.environ.get("DUCK_GITHUB_REPO", "Digi-Worm/duck-hub")
 if os.name == "nt":
     DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "DuckHub"
@@ -171,7 +184,7 @@ def register_hosts_and_firewall():
 
 def elevate_register_hosts():
     """Trigger OS elevation (UAC on Windows, pkexec on Linux) to run --register-hosts."""
-    script_path = os.path.abspath(__file__)
+    script_path = str(SCRIPT_PATH)
     if os.name == "nt":
         params = f'-c "import sys; exec(compile(open(sys.argv[1], encoding=\'utf-8\').read().split(\'#!PYTHON_START\', 1)[1], sys.argv[1], \'exec\'))" "{script_path}" --register-hosts'
         rc = ctypes.windll.shell32.ShellExecuteW(None, "runas", sys.executable, params, None, 0)
@@ -953,9 +966,15 @@ class DuckState:
                     "error": f"{type(e).__name__}: {e}{hint}"}
 
     def apply_github_update(self):
-        url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/duck.cmd"
-        req = urllib.request.Request(url, headers={"User-Agent": "DuckHub-Updater"})
-        with urllib.request.urlopen(req, timeout=15) as resp:
+        # Cache-bust the CDN just like check_github_update, so apply never downloads
+        # a stale copy older than the version the check just saw.
+        url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/duck.cmd?_={int(time.time())}"
+        req = urllib.request.Request(url, headers={
+            "User-Agent": "DuckHub-Updater",
+            "Cache-Control": "no-cache",
+            "Pragma": "no-cache",
+        })
+        with urllib.request.urlopen(req, timeout=20) as resp:
             new_data = resp.read()
         if b"#!PYTHON_START" not in new_data:
             raise ValueError("Invalid update payload: missing polyglot marker")
@@ -968,7 +987,7 @@ class DuckState:
         except SyntaxError as e:
             raise ValueError(f"Downloaded update failed to compile, aborted: {e}")
 
-        cur_path = Path(os.path.abspath(__file__))
+        cur_path = SCRIPT_PATH
         bak_path = cur_path.with_suffix(".cmd.bak")
         if cur_path.exists():
             shutil.copy2(cur_path, bak_path)
