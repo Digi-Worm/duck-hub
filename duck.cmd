@@ -54,7 +54,7 @@ except ImportError:
     HAS_TK = False
 
 APP_NAME = "Duck"
-APP_VERSION = "1.3.3"
+APP_VERSION = "1.4.0"
 
 def _resolve_script_path():
     try:
