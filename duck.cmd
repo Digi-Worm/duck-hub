@@ -54,8 +54,8 @@ except ImportError:
     HAS_TK = False
 
 APP_NAME = "Duck"
-APP_VERSION = "1.1.0"
-GITHUB_REPO = os.environ.get("DUCK_GITHUB_REPO", "vivek/duck-hub")
+APP_VERSION = "1.2.0"
+GITHUB_REPO = os.environ.get("DUCK_GITHUB_REPO", "Digi-Worm/duck-hub")
 if os.name == "nt":
     DATA_DIR = Path(os.environ.get("LOCALAPPDATA") or Path.home()) / "DuckHub"
 else:
@@ -912,7 +912,8 @@ class DuckState:
                 head = resp.read(8192).decode("utf-8", errors="ignore")
             m = re.search(r'APP_VERSION\s*=\s*"([^"]+)"', head)
             if not m:
-                return {"available": False, "current": APP_VERSION, "repo": GITHUB_REPO}
+                return {"available": False, "current": APP_VERSION, "repo": GITHUB_REPO,
+                        "error": "APP_VERSION not found in remote file"}
             remote_ver = m.group(1)
             cur_t = tuple(int(x) for x in re.findall(r"\d+", APP_VERSION)[:3])
             rem_t = tuple(int(x) for x in re.findall(r"\d+", remote_ver)[:3])
@@ -923,7 +924,12 @@ class DuckState:
                 self.broadcast({"type": "update_available", "update": info})
             return info
         except Exception as e:
-            return {"available": False, "current": APP_VERSION, "repo": GITHUB_REPO, "error": str(e)}
+            # Report the real failure instead of silently masquerading as "up to date":
+            # a 404 (wrong/renamed repo) and a genuine "no update" used to look identical.
+            code = getattr(e, "code", None)
+            hint = " (repository not found — check GITHUB_REPO / DUCK_GITHUB_REPO)" if code == 404 else ""
+            return {"available": False, "current": APP_VERSION, "repo": GITHUB_REPO,
+                    "error": f"{type(e).__name__}: {e}{hint}"}
 
     def apply_github_update(self):
         url = f"https://raw.githubusercontent.com/{GITHUB_REPO}/main/duck.cmd"
@@ -931,12 +937,34 @@ class DuckState:
         with urllib.request.urlopen(req, timeout=15) as resp:
             new_data = resp.read()
         if b"#!PYTHON_START" not in new_data:
-            raise ValueError("Invalid update payload")
+            raise ValueError("Invalid update payload: missing polyglot marker")
+
+        # Validate the download BEFORE touching the live file. A truncated or HTML-error
+        # response used to overwrite duck.cmd and brick the app with no way back.
+        payload = new_data.split(b"#!PYTHON_START", 1)[1].decode("utf-8", errors="replace")
+        try:
+            compile(payload, "duck.cmd", "exec")
+        except SyntaxError as e:
+            raise ValueError(f"Downloaded update failed to compile, aborted: {e}")
+
         cur_path = Path(os.path.abspath(__file__))
         bak_path = cur_path.with_suffix(".cmd.bak")
         if cur_path.exists():
             shutil.copy2(cur_path, bak_path)
-        cur_path.write_bytes(new_data)
+
+        # Write to a temp file in the same directory, then atomically replace, so an
+        # interrupted write can never leave a half-written duck.cmd behind.
+        tmp_path = cur_path.with_suffix(".cmd.new")
+        try:
+            tmp_path.write_bytes(new_data)
+            os.replace(tmp_path, cur_path)
+        except Exception:
+            try:
+                tmp_path.unlink()
+            except Exception:
+                pass
+            raise
+
         self.log(f"Updated {cur_path.name} from GitHub ({GITHUB_REPO}). Restart Duck to apply.")
         return {"ok": True, "message": "Updated! Restart duck.cmd to run the new version."}
 
